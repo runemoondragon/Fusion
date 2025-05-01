@@ -1,23 +1,47 @@
-from flask import Flask, render_template, request, jsonify, url_for
+from flask import Flask, render_template, request, jsonify, url_for, session
 from ce3 import Assistant
 import os
 from werkzeug.utils import secure_filename
 import base64
 from config import Config
+# Import the factory
+from providers.provider_factory import ProviderFactory
+import logging # Add logging
 
 app = Flask(__name__, static_folder='static')
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
+# Add a secret key for session management
+# You should set FLASK_SECRET_KEY in your .env file for production
+app.secret_key = os.getenv('FLASK_SECRET_KEY', os.urandom(24))
 
 # Ensure upload directory exists
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-# Initialize the assistant
+# Initialize the assistant (now stateless regarding provider client)
 assistant = Assistant()
 
 @app.route('/')
 def home():
-    return render_template('index.html')
+    # Pass the list of available providers to the template
+    available_providers = list(ProviderFactory._providers.keys())
+    selected_provider = session.get('provider', 'claude') # Default to claude
+    return render_template('index.html', 
+                           providers=available_providers, 
+                           selected_provider=selected_provider)
+
+@app.route('/set_provider', methods=['POST'])
+def set_provider():
+    data = request.json
+    provider_name = data.get('provider')
+    available_providers = list(ProviderFactory._providers.keys())
+    if provider_name and provider_name in available_providers:
+        session['provider'] = provider_name
+        logging.info(f"Set provider to: {provider_name}")
+        return jsonify({'status': 'success', 'provider': provider_name})
+    else:
+        logging.warning(f"Invalid provider requested: {provider_name}")
+        return jsonify({'status': 'error', 'message': 'Invalid provider'}), 400
 
 @app.route('/chat', methods=['POST'])
 def chat():
@@ -25,68 +49,75 @@ def chat():
     message = data.get('message', '')
     image_data = data.get('image')  # Get the base64 image data
     
+    # Determine the provider to use
+    provider_name = session.get('provider', 'claude') # Default to claude
+    logging.info(f"Using provider: {provider_name}")
+
+    try:
+        # Create the provider instance using the factory
+        provider = ProviderFactory.create_provider(provider_name)
+    except ValueError as e:
+         logging.error(f"Failed to create provider '{provider_name}': {e}")
+         return jsonify({
+             'response': f"Error: Could not initialize AI provider '{provider_name}'. Please select a valid provider.",
+             'thinking': False,
+             'tool_name': None,
+             'token_usage': {'total_tokens': assistant.total_tokens_used, 'max_tokens': Config.MAX_CONVERSATION_TOKENS}
+         }), 200 # Return 200 for frontend handling
+    except Exception as e:
+         logging.exception(f"Unexpected error creating provider '{provider_name}'")
+         return jsonify({
+             'response': f"Error: An unexpected error occurred while setting up the AI provider.",
+             'thinking': False,
+             'tool_name': None,
+             'token_usage': {'total_tokens': assistant.total_tokens_used, 'max_tokens': Config.MAX_CONVERSATION_TOKENS}
+         }), 200
+
     # Prepare the message content
     if image_data:
-        # Create a message with both text and image in correct order
         message_content = [
             {
                 "type": "image",
                 "source": {
                     "type": "base64",
-                    "media_type": "image/jpeg",  # We should detect this from the image
-                    "data": image_data.split(',')[1] if ',' in image_data else image_data  # Remove data URL prefix if present
+                    "media_type": "image/jpeg", # TODO: Detect media_type from image_data if possible
+                    "data": image_data.split(',')[1] if ',' in image_data else image_data
                 }
             }
         ]
-        
-        # Only add text message if there is actual text
         if message.strip():
-            message_content.append({
-                "type": "text",
-                "text": message
-            })
+            message_content.append({"type": "text", "text": message})
     else:
-        # Text-only message
         message_content = message
     
     try:
-        # Handle the chat message with the appropriate content
-        response = assistant.chat(message_content)
+        # Call the refactored assistant.chat with the selected provider
+        result = assistant.chat(message_content, provider)
         
-        # Get token usage from assistant
+        response_text = result.get('response', "[No response text received]")
+        tool_name = result.get('tool_name') # Get tool name from the result dict
+
+        # Get current token usage from assistant
         token_usage = {
             'total_tokens': assistant.total_tokens_used,
             'max_tokens': Config.MAX_CONVERSATION_TOKENS
         }
         
-        # Get the last used tool from the conversation history
-        tool_name = None
-        if assistant.conversation_history:
-            for msg in reversed(assistant.conversation_history):
-                if msg.get('role') == 'assistant' and msg.get('content'):
-                    content = msg['content']
-                    if isinstance(content, list):
-                        for block in content:
-                            if isinstance(block, dict) and block.get('type') == 'tool_use':
-                                tool_name = block.get('name')
-                                break
-                    if tool_name:
-                        break
-        
         return jsonify({
-            'response': response,
-            'thinking': False,
+            'response': response_text,
+            'thinking': False, # Thinking state is handled within assistant now
             'tool_name': tool_name,
             'token_usage': token_usage
         })
         
     except Exception as e:
+        logging.exception("Error during assistant.chat call") # Log the full traceback
         return jsonify({
-            'response': f"Error: {str(e)}",
+            'response': f"Error processing chat: {str(e)}",
             'thinking': False,
             'tool_name': None,
-            'token_usage': None
-        }), 200  # Return 200 even for errors to handle them gracefully in frontend
+            'token_usage': {'total_tokens': assistant.total_tokens_used, 'max_tokens': Config.MAX_CONVERSATION_TOKENS}
+        }), 200 # Return 200 for frontend handling
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
@@ -124,7 +155,12 @@ def upload_file():
 def reset():
     # Reset the assistant's conversation history
     assistant.reset()
+    # Optional: Reset the provider selection in session? 
+    # session['provider'] = 'claude' # Uncomment to reset provider on reset
+    logging.info("Conversation reset.")
     return jsonify({'status': 'success'})
 
 if __name__ == '__main__':
-    app.run(debug=False) 
+    # Use debug=True for development, False for production
+    # Consider using a proper WSGI server like gunicorn or waitress for production
+    app.run(debug=True, host='0.0.0.0', port=5000) # Run on 0.0.0.0 to be accessible on network 

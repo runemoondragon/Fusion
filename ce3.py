@@ -1,5 +1,6 @@
 # ce3.py
-import anthropic
+# Remove anthropic import if no longer needed directly here
+# import anthropic 
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.live import Live
@@ -16,6 +17,12 @@ import logging
 
 from config import Config
 from tools.base import BaseTool
+# Import the provider base and potentially the factory if needed
+from providers.base_provider import BaseProvider 
+# Import specific provider classes for type checking
+from providers.claude_provider import ClaudeProvider
+from providers.openai_provider import OpenAIProvider
+from providers.gemini_provider import GeminiProvider
 from prompt_toolkit import prompt
 from prompt_toolkit.styles import Style
 from prompts.system_prompts import SystemPrompts
@@ -30,24 +37,26 @@ class Assistant:
     """
     The Assistant class manages:
     - Loading of tools from a specified directory.
-    - Interaction with the Anthropics API (message completion).
+    - Orchestrating conversation flow with a given AI provider.
     - Handling user commands such as 'refresh' and 'reset'.
     - Token usage tracking and display.
-    - Tool execution upon request from model responses.
+    - Tool execution based on provider responses.
     """
 
     def __init__(self):
-        if not getattr(Config, 'ANTHROPIC_API_KEY', None):
-            raise ValueError("No ANTHROPIC_API_KEY found in environment variables")
+        # API key check might be deferred to providers or kept general
+        # if not getattr(Config, 'ANTHROPIC_API_KEY', None): # Remove or adapt check
+        #     raise ValueError("No ANTHROPIC_API_KEY found in environment variables") 
 
-        # Initialize Anthropics client
-        self.client = anthropic.Anthropic(api_key=Config.ANTHROPIC_API_KEY)
+        # Remove Anthropic client initialization
+        # self.client = anthropic.Anthropic(api_key=Config.ANTHROPIC_API_KEY) 
 
         self.conversation_history: List[Dict[str, Any]] = []
         self.console = Console()
 
         self.thinking_enabled = getattr(Config, 'ENABLE_THINKING', False)
-        self.temperature = getattr(Config, 'DEFAULT_TEMPERATURE', 0.7)
+        # Temperature might move to provider call if it varies
+        # self.temperature = getattr(Config, 'DEFAULT_TEMPERATURE', 0.7) 
         self.total_tokens_used = 0
 
         self.tools = self._load_tools()
@@ -302,15 +311,22 @@ class Assistant:
                     return candidate_tool
         return None
 
-    def _display_token_usage(self, usage):
+    def _display_token_usage(self, usage: Dict[str, int]):
         """
-        Display a visual representation of token usage and remaining tokens.
-        Uses only the tracked total_tokens_used.
+        Display token usage. 
+        Now receives usage dict directly from the provider response processing.
+        Updates total token count.
         """
+        input_tokens = usage.get('input_tokens', 0)
+        output_tokens = usage.get('output_tokens', 0)
+        
+        # Update total token usage
+        self.total_tokens_used += input_tokens + output_tokens
+
         used_percentage = (self.total_tokens_used / Config.MAX_CONVERSATION_TOKENS) * 100
         remaining_tokens = max(0, Config.MAX_CONVERSATION_TOKENS - self.total_tokens_used)
 
-        self.console.print(f"\nTotal used: {self.total_tokens_used:,} / {Config.MAX_CONVERSATION_TOKENS:,}")
+        self.console.print(f"\nTokens: In={input_tokens:,}, Out={output_tokens:,} | Total: {self.total_tokens_used:,} / {Config.MAX_CONVERSATION_TOKENS:,}")
 
         bar_width = 40
         filled = int(used_percentage / 100 * bar_width)
@@ -324,133 +340,214 @@ class Assistant:
 
         self.console.print(f"[{color}][{bar}] {used_percentage:.1f}%[/{color}]")
 
-        if remaining_tokens < 20000:
+        if remaining_tokens < 20000: # Keep warning threshold
             self.console.print(f"[bold red]Warning: Only {remaining_tokens:,} tokens remaining![/bold red]")
 
         self.console.print("---")
 
-    def _get_completion(self):
+        # Return True if token limit is reached
+        return self.total_tokens_used >= Config.MAX_CONVERSATION_TOKENS
+
+    def chat(self, user_input, provider: BaseProvider) -> Dict[str, Any]:
         """
-        Get a completion from the Anthropic API.
-        Handles both text-only and multimodal messages.
+        Process a chat message using the specified provider.
+        Orchestrates the conversation loop including tool calls.
+        user_input can be either a string (text-only) or a list (multimodal message).
+
+        Returns:
+            A dictionary containing the final response text and the name of the last tool used (if any).
+            e.g., {'response': '...', 'tool_name': '...'}
         """
-        try:
-            response = self.client.messages.create(
-                model=Config.MODEL,
-                max_tokens=min(
-                    Config.MAX_TOKENS,
-                    Config.MAX_CONVERSATION_TOKENS - self.total_tokens_used
-                ),
-                temperature=self.temperature,
-                tools=self.tools,
-                messages=self.conversation_history,
-                system=f"{SystemPrompts.DEFAULT}\n\n{SystemPrompts.TOOL_USAGE}"
-            )
-
-            # Update token usage based on response usage
-            if hasattr(response, 'usage') and response.usage:
-                message_tokens = response.usage.input_tokens + response.usage.output_tokens
-                self.total_tokens_used += message_tokens
-                self._display_token_usage(response.usage)
-
-            if self.total_tokens_used >= Config.MAX_CONVERSATION_TOKENS:
-                self.console.print("\n[bold red]Token limit reached! Please reset the conversation.[/bold red]")
-                return "Token limit reached! Please type 'reset' to start a new conversation."
-
-            if response.stop_reason == "tool_use":
-                self.console.print("\n[bold yellow]  Handling Tool Use...[/bold yellow]\n")
-
-                tool_results = []
-                if getattr(response, 'content', None) and isinstance(response.content, list):
-                    # Execute each tool in the response content
-                    for content_block in response.content:
-                        if content_block.type == "tool_use":
-                            result = self._execute_tool(content_block)
-                            
-                            # Handle structured data (like image blocks) vs text
-                            if isinstance(result, (list, dict)):
-                                tool_results.append({
-                                    "type": "tool_result",
-                                    "tool_use_id": content_block.id,
-                                    "content": result  # Keep structured data intact
-                                })
-                            else:
-                                # Convert text results to proper content blocks
-                                tool_results.append({
-                                    "type": "tool_result",
-                                    "tool_use_id": content_block.id,
-                                    "content": [{"type": "text", "text": str(result)}]
-                                })
-
-                    # Append tool usage to conversation and continue
-                    self.conversation_history.append({
-                        "role": "assistant",
-                        "content": response.content
-                    })
-                    self.conversation_history.append({
-                        "role": "user",
-                        "content": tool_results
-                    })
-                    return self._get_completion()  # Recursive call to continue the conversation
-
-                else:
-                    self.console.print("[red]No tool content received despite 'tool_use' stop reason.[/red]")
-                    return "Error: No tool content received"
-
-            # Final assistant response
-            if (getattr(response, 'content', None) and 
-                isinstance(response.content, list) and 
-                response.content):
-                final_content = response.content[0].text
-                self.conversation_history.append({
-                    "role": "assistant",
-                    "content": response.content
-                })
-                return final_content
-            else:
-                self.console.print("[red]No content in final response.[/red]")
-                return "No response content available."
-
-        except Exception as e:
-            logging.error(f"Error in _get_completion: {str(e)}")
-            return f"Error: {str(e)}"
-
-    def chat(self, user_input):
-        """
-        Process a chat message from the user.
-        user_input can be either a string (text-only) or a list (multimodal message)
-        """
-        # Handle special commands only for text-only messages
+        final_response_text = ""
+        last_tool_name = None
+        
+        # Handle special CLI commands first (only for string input)
         if isinstance(user_input, str):
             if user_input.lower() == 'refresh':
                 self.refresh_tools()
-                return "Tools refreshed successfully!"
+                return {'response': "Tools refreshed successfully!", 'tool_name': None}
             elif user_input.lower() == 'reset':
                 self.reset()
-                return "Conversation reset!"
+                return {'response': "Conversation reset!", 'tool_name': None}
             elif user_input.lower() == 'quit':
-                return "Goodbye!"
+                 return {'response': "Goodbye!", 'tool_name': None} # Or handle exit differently
 
         try:
             # Add user message to conversation history
             self.conversation_history.append({
                 "role": "user",
-                "content": user_input  # This can be either string or list
+                "content": user_input 
             })
 
-            # Show thinking indicator if enabled
-            if self.thinking_enabled:
-                with Live(Spinner('dots', text='Thinking...', style="cyan"), 
-                         refresh_per_second=10, transient=True):
-                    response = self._get_completion()
-            else:
-                response = self._get_completion()
+            max_turns = 5 # Safety break for tool loops
+            turn_count = 0
 
-            return response
+            # Start conversation loop (handles potential tool calls)
+            while turn_count < max_turns:
+                turn_count += 1
+                
+                # Check token limit before calling provider
+                if self.total_tokens_used >= Config.MAX_CONVERSATION_TOKENS:
+                    self.console.print("\n[bold red]Token limit reached! Please reset the conversation.[/bold red]")
+                    return {'response': "Token limit reached! Please type 'reset' to start a new conversation.", 'tool_name': None}
 
+                # Prepare messages for the provider (usually the whole history)
+                messages_to_send = self.conversation_history
+                
+                # Show thinking indicator
+                live_spinner = None
+                if self.thinking_enabled and self.console: # Check console exists for CLI use
+                    live_spinner = Live(Spinner('dots', text='Thinking...', style="cyan"), 
+                                        refresh_per_second=10, transient=True, console=self.console)
+                    live_spinner.start()
+
+                try:
+                     # Call the provider's chat method
+                     api_response = provider.chat(
+                         messages=messages_to_send,
+                         tools=self.tools,
+                         config=Config # Pass entire config for flexibility
+                     )
+                finally:
+                    if live_spinner:
+                        live_spinner.stop()
+
+                # Process usage info and check token limit
+                usage = api_response.get('usage', {})
+                if self._display_token_usage(usage): # display also updates total_tokens_used and returns True if limit reached
+                    return {'response': "Token limit reached during processing! Please type 'reset' to start a new conversation.", 'tool_name': last_tool_name}
+
+                # Extract content (might be list or other structure depending on provider)
+                response_content = api_response.get('content')
+                stop_reason = api_response.get('stop_reason') # Get stop reason if available
+
+                # --- Tool Handling Logic ---
+                tool_calls_detected = False
+                tool_results = []
+                assistant_message_content = [] # Build assistant message content list
+                potential_final_text = "" # Store text part in case it's the final response
+                
+                # Check if the response content is a list (common format now)
+                if isinstance(response_content, list):
+                     for block in response_content:
+                         # --- Provider-Specific Block Processing --- 
+                         is_tool_use = False
+                         block_type = None
+                         tool_use_id = None
+                         tool_name = None
+                         tool_input = None
+                         text_content = None
+
+                         if isinstance(provider, ClaudeProvider) and hasattr(block, 'type'):
+                             # Claude uses Pydantic objects with dot notation
+                             block_type = block.type
+                             if block_type == 'tool_use':
+                                 is_tool_use = True
+                                 tool_use_id = block.id
+                                 tool_name = block.name
+                                 tool_input = block.input or {}
+                             elif block_type == 'text':
+                                 text_content = block.text
+                                 potential_final_text = text_content # Store text
+
+                         elif isinstance(provider, (OpenAIProvider, GeminiProvider)) and isinstance(block, dict):
+                             # OpenAI/Gemini providers were implemented to return dicts
+                             block_type = block.get('type')
+                             if block_type == 'tool_use':
+                                 is_tool_use = True
+                                 tool_use_id = block.get('id')
+                                 tool_name = block.get('name')
+                                 tool_input = block.get('input', {})
+                             elif block_type == 'text':
+                                  text_content = block.get('text', '')
+                                  potential_final_text = text_content # Store text
+                         # --- End Provider-Specific Block Processing ---
+
+                         # Add the original block to the assistant message history
+                         # (assuming providers return compatible dict/object structures for history)
+                         assistant_message_content.append(block)
+
+                         # If it was a tool use, execute it
+                         if is_tool_use:
+                             tool_calls_detected = True
+                             last_tool_name = tool_name # Track last tool used
+                             self.console.print(f"\n[bold yellow]  Executing Tool: {tool_name}[/bold yellow]\n")
+                             
+                             # Need to pass the correct object/dict to _execute_tool
+                             # _execute_tool expects an object with .name and .input attributes
+                             # Let's create a simple mock object for consistency if needed
+                             class ToolUseMock:
+                                 def __init__(self, name, input_data, id_val=None): # Add id if needed
+                                     self.name = name
+                                     self.input = input_data
+                                     self.id = id_val # Store id if available
+                             
+                             tool_use_obj = ToolUseMock(tool_name, tool_input, tool_use_id)
+                             result = self._execute_tool(tool_use_obj)
+
+                             # Format tool result for history
+                             tool_results.append({
+                                 "type": "tool_result",
+                                 "tool_use_id": tool_use_id,
+                                 # Include tool_name for Gemini result formatting
+                                 "tool_name": tool_name, 
+                                 "content": result 
+                             })
+                         # else: pass # If it's just text, we stored it in potential_final_text
+                
+                # Handle cases where the entire response might be a single string (less common now)
+                elif isinstance(response_content, str):
+                    potential_final_text = response_content
+                    # Add the simple string response to history
+                    assistant_message_content.append({"type": "text", "text": response_content}) 
+                
+                # --- End Tool Handling ---
+
+                if tool_calls_detected:
+                    # Add assistant's message (containing tool_use blocks) to history
+                    self.conversation_history.append({
+                         "role": "assistant",
+                         "content": assistant_message_content 
+                     })
+                    # Add the tool results as a user message and continue loop
+                    self.conversation_history.append({
+                        "role": "user", # Role for tool results
+                        "content": tool_results
+                    })
+                    continue # Continue loop to get model response after tool execution
+                else:
+                    # No tool use detected, this is the final response.
+                    # Use the text content we captured earlier.
+                    final_response_text = potential_final_text
+                    
+                    # Add the final assistant message to history
+                    self.conversation_history.append({
+                        "role": "assistant",
+                        # Store the structured content if available, otherwise the text
+                        "content": assistant_message_content if assistant_message_content else final_response_text
+                    })
+
+                    # Validate final response text
+                    if not final_response_text and assistant_message_content:
+                        final_response_text = "[Assistant responded with non-text content]"
+                    elif not final_response_text and not assistant_message_content:
+                         final_response_text = "[No suitable content found in response]"
+                    
+                    # Break the loop as we have the final answer
+                    break
+
+            if turn_count >= max_turns:
+                 final_response_text = "[Reached maximum tool execution turns]"
+                 self.console.print(f"[bold red]{final_response_text}[/bold red]")
+
+            return {'response': final_response_text, 'tool_name': last_tool_name}
+
+        except ConnectionError as e:
+             logging.error(f"Connection Error in chat: {e}")
+             return {'response': f"Error communicating with AI provider: {e}", 'tool_name': None}
         except Exception as e:
-            logging.error(f"Error in chat: {str(e)}")
-            return f"Error: {str(e)}"
+            logging.exception("Error during chat processing")
+            return {'response': f"An unexpected error occurred: {str(e)}", 'tool_name': None}
 
     def reset(self):
         """
@@ -458,19 +555,14 @@ class Assistant:
         """
         self.conversation_history = []
         self.total_tokens_used = 0
-        self.console.print("\n[bold green]🔄 Assistant memory has been reset![/bold green]")
+        # Only print if console is available (for CLI)
+        if hasattr(self, 'console') and self.console:
+            self.console.print("\n[bold green]🔄 Assistant memory has been reset![/bold green]")
 
-        welcome_text = """
-# Claude Engineer v3. A self-improving assistant framework with tool creation
-
-Type 'refresh' to reload available tools
-Type 'reset' to clear conversation history
-Type 'quit' to exit
-
-Available tools:
-"""
-        self.console.print(Markdown(welcome_text))
-        self.display_available_tools()
+            # Optional: Display welcome and tools for CLI (Also needs indent if uncommented)
+            # welcome_text = ...
+            # self.console.print(Markdown(welcome_text))
+            # self.display_available_tools()
 
 
 def main():
@@ -483,6 +575,8 @@ def main():
 
     try:
         assistant = Assistant()
+        # How to select provider here? Default to Claude? Add argument?
+        # provider = ProviderFactory.create_provider("claude") # Example: Default
     except ValueError as e:
         console.print(f"[bold red]Error:[/bold red] {str(e)}")
         console.print("Please ensure ANTHROPIC_API_KEY is set correctly.")
@@ -502,28 +596,43 @@ Available tools:
 
     while True:
         try:
-            user_input = prompt("You: ", style=style).strip()
+            # ... Prompt user ...
+            user_input_text = prompt("You: ", style=style).strip()
 
-            if user_input.lower() == 'quit':
-                console.print("\n[bold blue]👋 Goodbye![/bold blue]")
+            if user_input_text.lower() == 'quit':
                 break
-            elif user_input.lower() == 'reset':
-                assistant.reset()
-                continue
+            
+            # Need to select provider here for CLI use
+            # For now, let's assume Claude for testing CLI
+            from providers.provider_factory import ProviderFactory # Local import for CLI
+            provider_name = "claude" # Hardcode for CLI example
+            provider = ProviderFactory.create_provider(provider_name)
 
-            response = assistant.chat(user_input)
-            console.print("\n[bold purple]Claude Engineer:[/bold purple]")
-            if isinstance(response, str):
-                safe_response = response.replace('[', '\\[').replace(']', '\\]')
-                console.print(safe_response)
-            else:
-                console.print(str(response))
+            # Call the refactored chat method
+            result = assistant.chat(user_input_text, provider)
+            response_text = result.get('response', '[No response]')
 
+            # Display response using Rich Markdown
+            console.print("\n")
+            console.print(Markdown(response_text))
+            console.print("\n---\n")
+
+            # Check if response indicates exit (e.g., from 'quit' command)
+            if response_text == "Goodbye!":
+                break
+            if "Token limit reached" in response_text:
+                # Maybe prompt user to reset or exit
+                pass
+        
+        # Ensure except blocks are correctly aligned with the try block inside the loop
         except KeyboardInterrupt:
-            continue
-        except EOFError:
-            break
+            # This break exits the while True loop
+            break 
+        except Exception as e:
+            console.print(f"\n[bold red]An error occurred:[/bold red] {str(e)}")
 
+    # This print is outside the loop
+    console.print("Exiting.")
 
 if __name__ == "__main__":
     main()

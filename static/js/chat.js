@@ -8,6 +8,20 @@ textarea.addEventListener('input', function() {
     this.style.height = (this.scrollHeight) + 'px';
 });
 
+// Function to get the current provider's avatar path
+function getProviderAvatarPath(providerName) {
+    switch (providerName.toLowerCase()) {
+        case 'claude':
+            return '/static/claude.png';
+        case 'openai':
+            return '/static/openai.png';
+        case 'gemini':
+            return '/static/gemini.png';
+        default:
+            return null; // Or a default avatar path
+    }
+}
+
 function appendMessage(content, isUser = false) {
     const messagesDiv = document.getElementById('chat-messages');
     const messageWrapper = document.createElement('div');
@@ -18,12 +32,36 @@ function appendMessage(content, isUser = false) {
     
     // Avatar
     const avatarDiv = document.createElement('div');
+    avatarDiv.className = 'w-8 h-8 rounded-full flex items-center justify-center text-white font-bold text-xs overflow-hidden';
+    
     if (isUser) {
-        avatarDiv.className = 'w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-gray-600 font-bold text-xs';
+        avatarDiv.classList.add('bg-gray-200', 'text-gray-600');
         avatarDiv.textContent = 'You';
     } else {
-        avatarDiv.className = 'w-8 h-8 rounded-full ai-avatar flex items-center justify-center text-white font-bold text-xs';
-        avatarDiv.textContent = 'CE';
+        avatarDiv.classList.add('ai-avatar');
+        avatarDiv.textContent = '';
+        
+        const providerSelect = document.getElementById('provider-select');
+        const currentProvider = providerSelect ? providerSelect.value : 'claude';
+        console.log(`[appendMessage] Current provider: ${currentProvider}`);
+        
+        const avatarPath = getProviderAvatarPath(currentProvider);
+        console.log(`[appendMessage] Avatar path: ${avatarPath}`);
+
+        if (avatarPath) {
+            console.log(`[appendMessage] Attempting to add image: ${avatarPath}`);
+            const img = document.createElement('img');
+            img.src = avatarPath;
+            img.alt = `${currentProvider} avatar`;
+            img.className = 'w-full h-full object-cover';
+            avatarDiv.appendChild(img);
+            console.log('[appendMessage] Image appended:', img);
+        } else {
+            console.log('[appendMessage] Avatar path not found, using fallback text.');
+            avatarDiv.textContent = currentProvider.substring(0, 2).toUpperCase();
+            console.log(`[appendMessage] Fallback text set to: ${avatarDiv.textContent}`);
+        }
+        console.log('[appendMessage] Final avatarDiv:', avatarDiv);
     }
     
     // Message content
@@ -96,10 +134,24 @@ function appendThinkingIndicator() {
     const messageDiv = document.createElement('div');
     messageDiv.className = 'flex items-start space-x-4';
     
-    // AI Avatar
+    // AI Avatar (Dynamic)
     const avatarDiv = document.createElement('div');
-    avatarDiv.className = 'w-8 h-8 rounded-full ai-avatar flex items-center justify-center text-white font-bold text-sm';
-    avatarDiv.textContent = 'CE';
+    avatarDiv.className = 'w-8 h-8 rounded-full ai-avatar flex items-center justify-center text-white font-bold text-xs overflow-hidden';
+    avatarDiv.textContent = '';
+    
+    const providerSelect = document.getElementById('provider-select');
+    const currentProvider = providerSelect ? providerSelect.value : 'claude';
+    const avatarPath = getProviderAvatarPath(currentProvider);
+
+    if (avatarPath) {
+        const img = document.createElement('img');
+        img.src = avatarPath;
+        img.alt = `${currentProvider} avatar`;
+        img.className = 'w-full h-full object-cover';
+        avatarDiv.appendChild(img);
+    } else {
+        avatarDiv.textContent = currentProvider.substring(0, 2).toUpperCase();
+    }
     
     // Thinking content
     const contentDiv = document.createElement('div');
@@ -136,10 +188,24 @@ function appendToolUsage(toolName) {
     const messageDiv = document.createElement('div');
     messageDiv.className = 'flex items-start space-x-4';
     
-    // AI Avatar
+    // AI Avatar (Dynamic)
     const avatarDiv = document.createElement('div');
-    avatarDiv.className = 'w-8 h-8 rounded-full ai-avatar flex items-center justify-center text-white font-bold text-sm';
-    avatarDiv.textContent = 'CE';
+    avatarDiv.className = 'w-8 h-8 rounded-full ai-avatar flex items-center justify-center text-white font-bold text-xs overflow-hidden';
+    avatarDiv.textContent = '';
+    
+    const providerSelect = document.getElementById('provider-select');
+    const currentProvider = providerSelect ? providerSelect.value : 'claude';
+    const avatarPath = getProviderAvatarPath(currentProvider);
+
+    if (avatarPath) {
+        const img = document.createElement('img');
+        img.src = avatarPath;
+        img.alt = `${currentProvider} avatar`;
+        img.className = 'w-full h-full object-cover';
+        avatarDiv.appendChild(img);
+    } else {
+        avatarDiv.textContent = currentProvider.substring(0, 2).toUpperCase();
+    }
     
     // Tool usage content
     const contentDiv = document.createElement('div');
@@ -188,6 +254,10 @@ document.getElementById('chat-form').addEventListener('submit', async (e) => {
     const message = messageInput.value.trim();
     
     if (!message && !currentImageData) return;
+    
+    // ** Hide welcome message and suggestions **
+    document.getElementById('welcome-message')?.classList.add('hidden');
+    document.getElementById('suggestion-cards-row')?.classList.add('hidden');
     
     // Append user message (and image if present)
     appendMessage(message, true);
@@ -294,6 +364,11 @@ window.addEventListener('load', async () => {
         
         // Reset token usage display
         updateTokenUsage(0, 200000);
+
+        // ** Show welcome message and suggestions on reset **
+        document.getElementById('welcome-message')?.classList.remove('hidden');
+        document.getElementById('suggestion-cards-row')?.classList.remove('hidden');
+
     } catch (error) {
         console.error('Error resetting conversation:', error);
     }

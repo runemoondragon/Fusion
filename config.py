@@ -6,6 +6,8 @@ load_dotenv()
 
 class Config:
     ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY')
+    OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+    GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
     MODEL = "claude-3-5-sonnet-20241022"
     MAX_TOKENS = 8000
     MAX_CONVERSATION_TOKENS = 200000  # Maximum tokens per conversation
