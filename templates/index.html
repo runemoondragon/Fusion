@@ -116,7 +116,7 @@
 <body class="bg-white text-gray-800 flex h-screen">
 
     <!-- Left Sidebar -->
-    <aside class="w-16 flex flex-col items-center bg-white border-r border-gray-200 py-4">
+    <aside class="w-16 hidden md:flex flex-col items-center bg-white border-r border-gray-200 py-4">
         <!-- Placeholder Logo -->
         <div img src="{{ url_for('static', filename='fusion.png') }}" alt="Fusion Logo" class="w-8 h-8 mb-6">
         <!-- Use Fusion Logo -->
@@ -140,29 +140,29 @@
     </aside>
 
     <!-- Main Content Area -->
-    <main class="flex-1 flex flex-col h-screen overflow-hidden">
+    <main class="w-full md:flex-1 flex flex-col h-screen overflow-hidden">
 
         <!-- Top Bar -->
-        <header class="bg-white border-b border-gray-200 px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-between">
-            <div class="flex items-center">
-                <label for="provider-select" class="text-sm font-medium text-gray-700 mr-2">AI Provider:</label>
+        <header class="bg-white border-b border-gray-200 px-2 sm:px-4 lg:px-8 py-2 sm:py-3 flex flex-col sm:flex-row items-start sm:items-center justify-between">
+            <div class="flex items-center mb-2 sm:mb-0 w-full sm:w-auto">
+                <label for="provider-select" class="text-sm font-medium text-gray-700 mr-1 sm:mr-2">AI:</label>
                 <select id="provider-select" class="text-sm border border-gray-300 rounded p-1 bg-white focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500">
                     {% for provider in providers %}
                         <option value="{{ provider }}" {% if provider == selected_provider %}selected{% endif %}>{{ provider|capitalize }}</option>
                     {% endfor %}
                 </select>
-                 <span class="text-xs text-gray-500 ml-3">Orchestrates using your preferred models</span>
+                 <span class="text-xs text-gray-500 ml-2 sm:ml-3 hidden sm:inline">Orchestrates using your preferred models</span>
             </div>
-            <button class="text-sm bg-blue-500 hover:bg-blue-600 text-white font-semibold py-1.5 px-4 rounded">
+            <button class="text-xs sm:text-sm bg-blue-500 hover:bg-blue-600 text-white font-semibold py-1 px-2 sm:py-1.5 sm:px-4 rounded self-end sm:self-center">
                 + New Chat
             </button>
         </header>
 
         <!-- Chat Area -->
-        <div class="flex-1 overflow-y-auto messages-container" id="chat-messages">
+        <div class="flex-1 overflow-y-auto messages-container px-2 sm:px-4 lg:px-8" id="chat-messages">
             <!-- Initial message state (Only welcome message) -->
              <div id="welcome-message" class="flex flex-col items-center justify-center h-full text-center px-4">
-                 <h1 class="text-3xl font-semibold text-gray-800 mt-[-10vh]"> <!-- Adjust vertical position -->
+                 <h1 class="text-2xl sm:text-3xl font-semibold text-gray-800 mt-[-15vh] sm:mt-[-10vh]"> <!-- Adjust vertical position -->
                      Hi! How can I help you?
                  </h1>
                  <!-- Old initial message structure hidden, only welcome text shown -->
@@ -181,26 +181,26 @@
 
         <!-- Token Usage Bar -->
         <div class="token-usage-container">
-            <div class="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8">
-                <div class="flex items-center space-x-4 text-sm text-gray-500">
-                    <div class="token-count">Total used: <span id="tokens-used">0</span> / <span id="max-tokens">200,000</span></div>
+            <div class="max-w-3xl mx-auto px-2 sm:px-4 lg:px-8">
+                <div class="flex items-center space-x-2 sm:space-x-4 text-xs sm:text-sm text-gray-500">
+                    <div class="token-count whitespace-nowrap">Used: <span id="tokens-used">0</span> / <span id="max-tokens">200k</span></div>
                     <div class="token-bar-container">
                         <div id="token-bar" class="token-bar" style="width: 0%"></div>
                     </div>
-                    <div id="token-percentage" class="token-percentage">0%</div>
+                    <div id="token-percentage" class="token-percentage min-w-[40px] sm:min-w-[48px]">0%</div>
                 </div>
             </div>
         </div>
 
         <!-- Input Area Wrapper (Sticky) -->
         <div class="input-wrapper">
-            <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="max-w-5xl mx-auto px-2 sm:px-4 lg:px-8">
 
                  <!-- Image Preview (Hidden initially) -->
-                 <div id="image-preview" class="hidden mb-2">
+                 <div id="image-preview" class="hidden mb-1 sm:mb-2">
                      <div class="relative inline-block">
-                         <img id="preview-img" class="max-h-24 rounded-lg border border-gray-200" src="" alt="Preview">
-                         <button type="button" id="remove-image" class="absolute -top-2 -right-2 bg-white rounded-full p-0.5 shadow-sm hover:bg-gray-100">
+                         <img id="preview-img" class="max-h-16 sm:max-h-24 rounded-lg border border-gray-200" src="" alt="Preview">
+                         <button type="button" id="remove-image" class="absolute -top-1 -right-1 sm:-top-2 sm:-right-2 bg-white rounded-full p-0.5 shadow-sm hover:bg-gray-100">
                              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-500" viewBox="0 0 20 20" fill="currentColor">
                                  <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
                              </svg>
@@ -255,21 +255,21 @@
                      </div>
 
                     <!-- Suggestion Cards Row -->
-                     <div id="suggestion-cards-row" class="mt-3 overflow-x-auto pb-2">
-                         <div class="flex items-start space-x-3 flex-nowrap">
-                            <div class="suggestion-card flex-shrink-0">
+                     <div id="suggestion-cards-row" class="mt-2 sm:mt-3 overflow-x-auto pb-1 sm:pb-2">
+                         <div class="flex items-start space-x-2 sm:space-x-3 flex-nowrap">
+                            <div class="suggestion-card flex-shrink-0 p-2 sm:p-3">
                                 <span class="tag bg-gray-100 text-gray-700">Available commands</span>
                                 <p class="description">&nbsp;</p> <!-- Placeholder or dynamic content -->
                             </div>
-                            <div class="suggestion-card flex-shrink-0">
+                            <div class="suggestion-card flex-shrink-0 p-2 sm:p-3">
                                 <span class="tag bg-orange-100 text-orange-700">refresh</span>
                                 <p class="description">Reload available tools</p>
                             </div>
-                             <div class="suggestion-card flex-shrink-0">
+                             <div class="suggestion-card flex-shrink-0 p-2 sm:p-3">
                                  <span class="tag bg-blue-100 text-blue-700">reset</span>
                                  <p class="description">Clear conversation history</p>
                              </div>
-                             <div class="suggestion-card flex-shrink-0">
+                             <div class="suggestion-card flex-shrink-0 p-2 sm:p-3">
                                  <span class="tag bg-red-100 text-red-700">quit</span>
                                  <p class="description">Exit the conversation</p>
                              </div>
@@ -282,8 +282,8 @@
         </div>
 
         <!-- Footer -->
-        <footer class="text-center py-2 border-t border-gray-100 mt-auto">
-            <p class="text-xs text-gray-500">
+        <footer class="text-center py-1 sm:py-2 border-t border-gray-100 mt-auto">
+            <p class="text-[10px] sm:text-xs text-gray-500">
                 Fusion — powered by Claude, Gemini, and GPT. Just ask, and the right assistant will step in.
             </p>
         </footer>
