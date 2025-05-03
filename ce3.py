@@ -489,8 +489,7 @@ class Assistant:
                              tool_results.append({
                                  "type": "tool_result",
                                  "tool_use_id": tool_use_id,
-                                 # Include tool_name for Gemini result formatting
-                                 "tool_name": tool_name, 
+                                 # "tool_name": tool_name, # Removed: Causes error for Claude API
                                  "content": result 
                              })
                          # else: pass # If it's just text, we stored it in potential_final_text
