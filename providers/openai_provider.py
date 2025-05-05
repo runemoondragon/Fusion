@@ -28,6 +28,36 @@ class OpenAIProvider(BaseProvider):
             self.client = openai.OpenAI(api_key=Config.OPENAI_API_KEY)
             self.logger.info("OpenAI client initialized.")
 
+    def _normalize_message_blocks(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Recursively convert any Pydantic/Anthropic message blocks to dicts. Leaves dicts unchanged.
+        Only used internally for OpenAIProvider to ensure compatibility.
+        """
+        def block_to_dict(block):
+            # If it's a Pydantic object (Anthropic), convert to dict
+            if hasattr(block, 'dict') and callable(getattr(block, 'dict', None)):
+                return block.dict()
+            # If it's a known Anthropic block (TextBlock, ToolUseBlock, etc.)
+            if hasattr(block, '__dict__') and hasattr(block, 'type'):
+                # Only include public attributes
+                return {k: v for k, v in block.__dict__.items() if not k.startswith('_')}
+            # If it's already a dict, return as is
+            if isinstance(block, dict):
+                return block
+            return block  # fallback (should not happen)
+
+        normalized = []
+        for msg in messages:
+            content = msg.get('content')
+            if isinstance(content, list):
+                norm_content = [block_to_dict(b) for b in content]
+            else:
+                norm_content = content
+            norm_msg = dict(msg)
+            norm_msg['content'] = norm_content
+            normalized.append(norm_msg)
+        return normalized
+
     def _format_tools_for_openai(self, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Convert the internal tool format to OpenAI's expected format."""
         openai_tools = []
@@ -153,6 +183,10 @@ class OpenAIProvider(BaseProvider):
                 'usage': {'input_tokens': 0, 'output_tokens': 0},
                 'stop_reason': 'error'
             }
+
+        # --- Normalize message blocks for OpenAI only ---
+        messages = self._normalize_message_blocks(messages)
+        # --- End normalization ---
 
         # Extract system prompt if present (OpenAI prefers it separate)
         system_prompt = None
