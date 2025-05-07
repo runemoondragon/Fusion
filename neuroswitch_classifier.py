@@ -104,7 +104,7 @@ class HuggingFaceClassifier:
         logging.debug(f"Sending payload to HF API: {payload}")
         print(f"[NeuroSwitch Console] Sending payload to HF API: {payload}") 
         try:
-            response = requests.post(self.api_url, headers=self.headers, json=payload, timeout=30)
+            response = requests.post(self.api_url, headers=self.headers, json=payload, timeout=59)
             response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
             result = response.json()
             logging.debug(f"Received result from HF API: {result}")

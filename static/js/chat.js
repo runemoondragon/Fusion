@@ -147,26 +147,41 @@ document.getElementById('remove-image').addEventListener('click', () => {
     document.getElementById('file-input').value = '';
 });
 
-// Add this function near the top of your file
-function updateTokenUsage(usedTokens, maxTokens) {
-    const percentage = (usedTokens / maxTokens) * 100;
+// --- UPDATED: Function to update the token usage bar ---
+function updateTokenUsage(usageData) { // Accept the whole usage object
+    const maxTokensDefault = 200000; // Use a default if max_tokens isn't provided
+    
+    // Extract values, providing defaults if missing or invalid
+    const usedTokens = parseInt(usageData?.total_tokens) || 0;
+    const maxTokens = parseInt(usageData?.max_tokens) || maxTokensDefault;
+    
+    // Calculate percentage, handle potential division by zero
+    const percentage = maxTokens > 0 ? (usedTokens / maxTokens) * 100 : 0;
+    
     const tokenBar = document.getElementById('token-bar');
-    const tokensUsed = document.getElementById('tokens-used');
-    const tokenPercentage = document.getElementById('token-percentage');
+    const tokensUsedSpan = document.getElementById('tokens-used'); // Renamed variable for clarity
+    const maxTokensSpan = document.getElementById('max-tokens'); // Get the max tokens span
+    const tokenPercentageSpan = document.getElementById('token-percentage'); // Renamed variable
     
-    // Update the numbers
-    tokensUsed.textContent = usedTokens.toLocaleString();
-    tokenPercentage.textContent = `${percentage.toFixed(1)}%`;
-    
-    // Update the bar
-    tokenBar.style.width = `${percentage}%`;
-    
-    // Update colors based on usage
-    tokenBar.classList.remove('warning', 'danger');
-    if (percentage > 90) {
-        tokenBar.classList.add('danger');
-    } else if (percentage > 75) {
-        tokenBar.classList.add('warning');
+    // Ensure elements exist before updating
+    if (tokenBar && tokensUsedSpan && maxTokensSpan && tokenPercentageSpan) {
+        // Update the numbers
+        tokensUsedSpan.textContent = usedTokens.toLocaleString();
+        maxTokensSpan.textContent = maxTokens.toLocaleString(); // Update max tokens display
+        tokenPercentageSpan.textContent = `${percentage.toFixed(1)}%`;
+        
+        // Update the bar width
+        tokenBar.style.width = `${Math.min(percentage, 100)}%`; // Cap width at 100%
+        
+        // Update colors based on usage
+        tokenBar.classList.remove('warning', 'danger');
+        if (percentage > 90) {
+            tokenBar.classList.add('danger');
+        } else if (percentage > 75) {
+            tokenBar.classList.add('warning');
+        }
+    } else {
+        console.error("Token usage UI elements not found!");
     }
 }
 
@@ -250,11 +265,7 @@ async function sendChatMessage() {
         appendMessage(responseText, 'ai', providerUsed, toolName, false);
 
         // Update token usage bar
-        if (tokenUsage.total_tokens !== undefined && tokenUsage.max_tokens !== undefined) {
-             updateTokenUsage(tokenUsage);
-        } else {
-            console.warn("Token usage data missing or incomplete in response");
-        }
+        if (tokenUsage.total_tokens !== undefined) { updateTokenUsage(tokenUsage); }
 
         // Update NeuroSwitch indicator based on response
         updateNeuroSwitchIndicator(isNeuroSwitchActive, fallbackReason);
@@ -309,7 +320,7 @@ window.addEventListener('load', async () => {
         resetTextarea();
         
         // Reset token usage display
-        updateTokenUsage(0, 200000);
+        updateTokenUsage({ total_tokens: 0, max_tokens: 200000 });
 
         // ** Show welcome message and suggestions on reset **
         document.getElementById('welcome-message')?.classList.remove('hidden');
@@ -488,13 +499,7 @@ async function sendChatMessage() {
         // Append final response
         appendMessage(responseText, 'ai', providerUsed, toolName, false);
 
-        if (tokenUsage.total_tokens !== undefined && tokenUsage.max_tokens !== undefined) {
-            updateTokenUsage(tokenUsage);
-        } else {
-             console.warn("Token usage data missing or incomplete in response");
-             // Maybe update with 0/default if missing?
-             // updateTokenUsage({ total_tokens: 0, max_tokens: 200000 }); // Example default
-        }
+        if (tokenUsage.total_tokens !== undefined) { updateTokenUsage(tokenUsage); }
 
         updateNeuroSwitchIndicator(isNeuroSwitchActive, fallbackReason);
 
@@ -673,7 +678,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (!response.ok) console.error('Initial reset failed');
                 else console.log('Initial conversation reset successful.');
                 // Reset token display after successful reset
-                updateTokenUsage({ total_tokens: 0, max_tokens: 200000 }); // Assume default max
+                updateTokenUsage({ total_tokens: 0, max_tokens: 200000 }); // Pass object
             })
             .catch(error => console.error('Error during initial reset:', error));
             
