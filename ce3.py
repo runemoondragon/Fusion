@@ -33,6 +33,14 @@ logging.basicConfig(
     format='%(levelname)s: %(message)s'
 )
 
+# --- ADDED: Mode Prompts Definition ---
+MODE_PROMPTS = {
+  "deep_research": "You are in Deep Research mode. Research deeply, verify facts, and reference credible sources.",
+  "think": "You are in Think mode. Analyze the question using careful, logical step-by-step reasoning.",
+  "write_code": "You are in Write/Code mode. Respond with concise, working code and explain it briefly.",
+  "image": "You are in Image mode. Describe the visual scene clearly, suitable for generating an illustration."
+}
+
 class Assistant:
     """
     The Assistant class manages:
@@ -348,12 +356,12 @@ class Assistant:
         # Return True if token limit is reached
         return self.total_tokens_used >= Config.MAX_CONVERSATION_TOKENS
 
-    def chat(self, user_input, provider: BaseProvider) -> Dict[str, Any]:
+    def chat(self, user_input, provider: BaseProvider, mode: str | None = None) -> Dict[str, Any]:
         """
         Process a chat message using the specified provider.
-        Orchestrates the conversation loop including tool calls.
+        Orchestrates the conversation loop including tool calls and mode injection.
         user_input can be either a string (text-only) or a list (multimodal message).
-
+        mode: Optional string indicating the selected operational mode.
         Returns:
             A dictionary containing the final response text and the name of the last tool used (if any).
             e.g., {'response': '...', 'tool_name': '...'}
@@ -374,7 +382,9 @@ class Assistant:
 
         try:
             # Add user message to conversation history
-            self.conversation_history.append({
+            # Use a copy of the history for this turn's processing to avoid persistent mode injection
+            current_turn_history = list(self.conversation_history) # Create a shallow copy
+            current_turn_history.append({
                 "role": "user",
                 "content": user_input 
             })
@@ -391,9 +401,33 @@ class Assistant:
                     self.console.print("\n[bold red]Token limit reached! Please reset the conversation.[/bold red]")
                     return {'response': "Token limit reached! Please type 'reset' to start a new conversation.", 'tool_name': None}
 
-                # Prepare messages for the provider (usually the whole history)
-                messages_to_send = self.conversation_history
+                # --- Determine if the last message was a tool result --- 
+                was_last_message_tool_result = False
+                if turn_count > 1 and current_turn_history: # Check if not the first turn
+                    last_msg = current_turn_history[-1]
+                    if last_msg.get('role') == 'user' and isinstance(last_msg.get('content'), list):
+                        # Check if any item in the content list is a tool_result
+                        if any(isinstance(item, dict) and item.get('type') == 'tool_result' for item in last_msg['content']):
+                            was_last_message_tool_result = True
+                            logging.info("Detected that the previous turn ended with tool results.")
                 
+                # --- Modified Mode Injection Logic --- 
+                messages_to_send = list(current_turn_history) # Work with turn-specific history copy
+                provider_name = provider.name # Get the actual provider's name
+                logging.info(f"Processing turn {turn_count} with provider: {provider_name}, Mode: {mode}")
+
+                # Inject mode prompt ONLY if:
+                # 1. Provider is NOT NeuroSwitch (handled by provider_name check)
+                # 2. A valid mode is selected
+                # 3. The PREVIOUS message was NOT a tool result (to avoid breaking sequence for providers like Claude)
+                if provider_name in ["ClaudeProvider", "OpenAIProvider", "GeminiProvider"] and mode and mode in MODE_PROMPTS and not was_last_message_tool_result:
+                    system_message = {"role": "system", "content": MODE_PROMPTS[mode]}
+                    messages_to_send.insert(0, system_message) 
+                    logging.info(f"Injected system prompt for mode: '{mode}'")
+                elif was_last_message_tool_result:
+                     logging.info("Skipping mode prompt injection because previous message was a tool result.")
+                # --- END Mode Injection Logic ---
+
                 # Show thinking indicator
                 live_spinner = None
                 if self.thinking_enabled and self.console: # Check console exists for CLI use
@@ -404,9 +438,9 @@ class Assistant:
                 try:
                      # Call the provider's chat method
                      api_response = provider.chat(
-                         messages=messages_to_send,
+                         messages=messages_to_send, 
                          tools=self.tools,
-                         config=Config # Pass entire config for flexibility
+                         config=Config
                      )
                 finally:
                     if live_spinner:
@@ -489,7 +523,7 @@ class Assistant:
                              tool_results.append({
                                  "type": "tool_result",
                                  "tool_use_id": tool_use_id,
-                                 # "tool_name": tool_name, # Removed: Causes error for Claude API
+                                  "tool_name": tool_name, # Removed: Causes error for Claude API
                                  "content": result 
                              })
                          # else: pass # If it's just text, we stored it in potential_final_text
@@ -513,6 +547,9 @@ class Assistant:
                         "role": "user", # Role for tool results
                         "content": tool_results
                     })
+                    # Update current_turn_history for the next iteration of the while loop
+                    current_turn_history.append({"role": "assistant", "content": assistant_message_content })
+                    current_turn_history.append({"role": "user", "content": tool_results})
                     continue # Continue loop to get model response after tool execution
                 else:
                     # No tool use detected, this is the final response.
@@ -538,6 +575,26 @@ class Assistant:
             if turn_count >= max_turns:
                  final_response_text = "[Reached maximum tool execution turns]"
                  self.console.print(f"[bold red]{final_response_text}[/bold red]")
+
+            # --- IMPORTANT: Add the initial user message to persistent history --- 
+            # This was only added to current_turn_history before the loop
+            # We need to add it *now* to ensure it's saved even if errors occurred within the loop
+            # Find the user message added at the start of the try block
+            initial_user_message_index = -1
+            for i, msg in enumerate(reversed(current_turn_history)):
+                 if msg['role'] == 'user' and msg['content'] == user_input:
+                      # This assumes the user_input is unique enough for this turn
+                      # A more robust way might involve passing the message index or ID
+                      initial_user_message_index = len(current_turn_history) - 1 - i
+                      break 
+            
+            if initial_user_message_index != -1 and not any(msg['role'] == 'user' and msg['content'] == user_input for msg in self.conversation_history):
+                self.conversation_history.insert(len(self.conversation_history) - (len(current_turn_history) - 1 - initial_user_message_index), current_turn_history[initial_user_message_index])
+            elif initial_user_message_index == -1:
+                 logging.warning("Could not reliably find initial user message to add to persistent history.")
+                 # As a fallback, add it now if it seems missing
+                 if not any(msg['role'] == 'user' and msg['content'] == user_input for msg in self.conversation_history):
+                     self.conversation_history.insert(max(0, len(self.conversation_history)-1), {"role": "user", "content": user_input}) 
 
             return {'response': final_response_text, 'tool_name': last_tool_name}
 

@@ -202,4 +202,30 @@ code {
     border-radius: 4px;
     font-family: monospace;
 }
+
+/* Add minor adjustments or overrides */
+.sidebar-icon {
+    /* ... existing styles ... */
+}
+
+.feature-button {
+    /* ... existing styles ... */
+    border: 1px solid #e5e7eb; /* default border */
+}
+.feature-button:hover {
+    background-color: #f9fafb; /* gray-50 */
+}
+
+/* --- ADDED: Active state for feature buttons --- */
+.feature-button.active {
+    border-color: #3b82f6; /* blue-500 */
+    background-color: #eff6ff; /* blue-50 */
+    color: #1d4ed8; /* blue-700 */
+    /* Add a subtle box-shadow or stronger border if desired */
+    /* box-shadow: 0 0 0 1px #3b82f6; */
+}
+
+.suggestion-card {
+    /* ... existing styles ... */
+}
   

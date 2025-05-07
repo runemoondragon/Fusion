@@ -28,6 +28,10 @@ class OpenAIProvider(BaseProvider):
             self.client = openai.OpenAI(api_key=Config.OPENAI_API_KEY)
             self.logger.info("OpenAI client initialized.")
 
+    @property
+    def name(self) -> str:
+        return "OpenAIProvider"
+
     def _normalize_message_blocks(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Recursively convert any Pydantic/Anthropic message blocks to dicts. Leaves dicts unchanged.

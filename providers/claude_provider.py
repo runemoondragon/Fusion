@@ -14,18 +14,46 @@ class ClaudeProvider(BaseProvider):
         self.client = anthropic.Anthropic(api_key=Config.ANTHROPIC_API_KEY)
         self.logger = logging.getLogger(__name__)
 
+    @property
+    def name(self) -> str:
+        return "ClaudeProvider"
+
     def chat(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]], config: Config) -> Dict[str, Any]:
         """Send chat request to Claude API."""
         self.logger.debug(f"Sending request to Claude with {len(messages)} messages and {len(tools)} tools.")
+        
+        # --- ADDED: Preprocess messages to remove tool_name from user tool_result blocks --- 
+        processed_messages = []
+        for msg in messages:
+            if msg.get('role') == 'user' and isinstance(msg.get('content'), list):
+                new_content = []
+                processed = False
+                for item in msg['content']:
+                    if isinstance(item, dict) and item.get('type') == 'tool_result' and 'tool_name' in item:
+                        # Create a copy without 'tool_name'
+                        filtered_item = {k: v for k, v in item.items() if k != 'tool_name'}
+                        new_content.append(filtered_item)
+                        processed = True
+                    else:
+                        new_content.append(item) # Keep other items as is
+                if processed:
+                    # Create a new message dict with the filtered content
+                    processed_messages.append({'role': msg['role'], 'content': new_content})
+                else:
+                    processed_messages.append(msg) # No changes needed for this message
+            else:
+                processed_messages.append(msg) # Keep non-user or non-list-content messages as is
+        # --- END Preprocessing --- 
+        
         try:
             response = self.client.messages.create(
                 model=config.MODEL,
                 max_tokens=config.MAX_TOKENS,
                 temperature=config.DEFAULT_TEMPERATURE,
-                system=self._get_system_prompt(), # Assuming system prompt is needed
-                messages=messages,
+                system=self._get_system_prompt(),
+                messages=processed_messages, # <<< USE PROCESSED MESSAGES
                 tools=tools,
-                tool_choice={"type": "auto"} # Let Claude decide when to use tools
+                tool_choice={"type": "auto"}
             )
             self.logger.debug(f"Received response from Claude. Stop reason: {response.stop_reason}")
             # Convert the response object to a dictionary for consistent return type
@@ -53,7 +81,12 @@ class ClaudeProvider(BaseProvider):
             raise ConnectionError(f"Anthropic API rate limit exceeded: {e}") from e # Or a more specific exception
         except anthropic.APIStatusError as e:
             self.logger.error(f"Claude APIStatusError: status={e.status_code}, response={e.response}")
-            raise ConnectionError(f"Anthropic API error (Status {e.status_code}): {e}") from e
+            # Pass the detailed error message back if possible
+            error_details = e.response.json().get('error', {})
+            error_message = error_details.get('message', str(e))
+            error_type = error_details.get('type', 'unknown_error')
+            full_error = f"Anthropic API error (Status {e.status_code}, Type: {error_type}): {error_message}"
+            raise ConnectionError(full_error) from e
         except Exception as e:
             self.logger.exception("An unexpected error occurred during Claude API call")
             raise RuntimeError(f"An unexpected error occurred interacting with Claude: {e}") from e

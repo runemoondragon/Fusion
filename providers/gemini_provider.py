@@ -47,6 +47,10 @@ class GeminiProvider(BaseProvider):
                 self.logger.exception("Failed to configure Gemini client")
                 # Keep self.model as None
 
+    @property
+    def name(self) -> str:
+        return "GeminiProvider"
+
     def _sanitize_schema_for_gemini(self, schema: Dict[str, Any]) -> Dict[str, Any]:
         """Recursively sanitize schema fields for Gemini compatibility."""
         if not isinstance(schema, dict):
@@ -332,3 +336,15 @@ class GeminiProvider(BaseProvider):
             self.logger.exception("An unexpected error occurred during Gemini API call")
             # You might want to inspect the specific error type from google.api_core.exceptions
             raise RuntimeError(f"An unexpected error occurred interacting with Gemini: {e}") from e 
+
+    def _prepare_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        # ... existing helper ...
+        pass
+
+    def _prepare_tools(self, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        # ... existing helper ...
+        pass
+
+    def _parse_response(self, response) -> Dict[str, Any]:
+        # ... existing helper ...
+        pass 

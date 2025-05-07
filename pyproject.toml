@@ -37,6 +37,8 @@ dependencies = [
     "protego>=0.3.1",
     "readability-lxml>=0.8.1",
     "e2b-code-interpreter>=1.0.3",
+    "openai",
+    "google-generativeai",
 ]
 
 [project.optional-dependencies]

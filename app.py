@@ -7,6 +7,8 @@ from config import Config
 # Import the factory
 from providers.provider_factory import ProviderFactory
 import logging # Add logging
+# Import the NeuroSwitch classifier function and default provider
+from neuroswitch_classifier import get_neuroswitch_provider, DEFAULT_PROVIDER
 
 app = Flask(__name__, static_folder='static')
 app.config['UPLOAD_FOLDER'] = 'uploads'
@@ -21,11 +23,18 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 # Initialize the assistant (now stateless regarding provider client)
 assistant = Assistant()
 
+# Define the static list of providers + NeuroSwitch
+# Define the constant here, where it's used
+NEUROSWITCH_PROVIDER_NAME = "NeuroSwitch"
+ALL_PROVIDERS_WITH_NEUROSWITCH = [NEUROSWITCH_PROVIDER_NAME] + list(ProviderFactory._providers.keys())
+
 @app.route('/')
 def home():
-    # Pass the list of available providers to the template
-    available_providers = list(ProviderFactory._providers.keys())
-    selected_provider = session.get('provider', 'claude') # Default to claude
+    # Pass the combined list of providers to the template
+    # available_providers = list(ProviderFactory._providers.keys()) # Old way
+    available_providers = ALL_PROVIDERS_WITH_NEUROSWITCH # New list including NeuroSwitch
+    # Default to NeuroSwitch if nothing is selected? Or keep claude? Let's keep claude for now.
+    selected_provider = session.get('provider', 'claude') 
     return render_template('index.html', 
                            providers=available_providers, 
                            selected_provider=selected_provider)
@@ -34,10 +43,11 @@ def home():
 def set_provider():
     data = request.json
     provider_name = data.get('provider')
-    available_providers = list(ProviderFactory._providers.keys())
+    # available_providers = list(ProviderFactory._providers.keys()) # Old check
+    available_providers = ALL_PROVIDERS_WITH_NEUROSWITCH # Check against the full list
     if provider_name and provider_name in available_providers:
         session['provider'] = provider_name
-        logging.info(f"Set provider to: {provider_name}")
+        logging.info(f"Set provider selection to: {provider_name}")
         return jsonify({'status': 'success', 'provider': provider_name})
     else:
         logging.warning(f"Invalid provider requested: {provider_name}")
@@ -47,66 +57,102 @@ def set_provider():
 def chat():
     data = request.json
     message = data.get('message', '')
-    image_data = data.get('image')  # Get the base64 image data
+    image_data = data.get('image')
+    mode = data.get('mode')
     
-    # Determine the provider to use
-    provider_name = session.get('provider', 'claude') # Default to claude
-    logging.info(f"Using provider: {provider_name}")
+    provider_selection = session.get('provider', DEFAULT_PROVIDER)
+    logging.info(f"User selected provider: {provider_selection}, Mode: {mode}")
 
-    try:
-        # Create the provider instance using the factory
-        provider = ProviderFactory.create_provider(provider_name)
-    except ValueError as e:
-         logging.error(f"Failed to create provider '{provider_name}': {e}")
-         return jsonify({
-             'response': f"Error: Could not initialize AI provider '{provider_name}'. Please select a valid provider.",
-             'thinking': False,
-             'tool_name': None,
-             'token_usage': {'total_tokens': assistant.total_tokens_used, 'max_tokens': Config.MAX_CONVERSATION_TOKENS}
-         }), 200 # Return 200 for frontend handling
-    except Exception as e:
-         logging.exception(f"Unexpected error creating provider '{provider_name}'")
-         return jsonify({
-             'response': f"Error: An unexpected error occurred while setting up the AI provider.",
-             'thinking': False,
-             'tool_name': None,
-             'token_usage': {'total_tokens': assistant.total_tokens_used, 'max_tokens': Config.MAX_CONVERSATION_TOKENS}
-         }), 200
+    actual_provider_name = DEFAULT_PROVIDER
+    neuroswitch_active = False # Default to inactive
+    fallback_reason = None     # Default to no reason
+    text_input_for_classification = ""
 
-    # Prepare the message content
+    # Prepare message content and extract text ...
     if image_data:
         message_content = [
             {
                 "type": "image",
                 "source": {
                     "type": "base64",
-                    "media_type": "image/jpeg", # TODO: Detect media_type from image_data if possible
+                    "media_type": "image/jpeg", # TODO: Detect media_type
                     "data": image_data.split(',')[1] if ',' in image_data else image_data
                 }
             }
         ]
         if message.strip():
-            message_content.append({"type": "text", "text": message})
+            text_part = {"type": "text", "text": message}
+            message_content.append(text_part)
+            text_input_for_classification = message # Use text part for classification
+        else:
+             # If only image, maybe classify based on a standard prompt or default?
+             # For now, if only image, let's default or maybe force Gemini?
+             # Let's stick to default if NeuroSwitch is chosen with only image for now.
+             text_input_for_classification = "Image uploaded" # Placeholder text?
     else:
         message_content = message
+        text_input_for_classification = message # Use the whole message if no image
+
+    # --- NeuroSwitch Logic ---    
+    if provider_selection == NEUROSWITCH_PROVIDER_NAME:
+        logging.info(f"NeuroSwitch activated. Classifying input...")
+        # Call the classifier function - now returns a dict
+        neuroswitch_status = get_neuroswitch_provider(text_input_for_classification)
+        actual_provider_name = neuroswitch_status["provider"]
+        neuroswitch_active = neuroswitch_status["neuroswitch_active"]
+        fallback_reason = neuroswitch_status["fallback_reason"]
+        logging.info(f"NeuroSwitch result: Provider='{actual_provider_name}', Active={neuroswitch_active}, Reason='{fallback_reason}'")
+    else:
+        # Use the provider selected manually by the user
+        actual_provider_name = provider_selection
+        neuroswitch_active = False # Not active if manually selected
+        logging.info(f"Using manually selected provider: {actual_provider_name}")
+    # --- End NeuroSwitch Logic ---
+
+    try:
+        # Create provider instance using the determined name
+        provider = ProviderFactory.create_provider(actual_provider_name)
+    except ValueError as e:
+         logging.error(f"Failed to create provider '{actual_provider_name}': {e}")
+         return jsonify({
+             'response': f"Error: Could not initialize AI provider '{actual_provider_name}'. Please select a valid provider.",
+             'thinking': False,
+             'tool_name': None,
+             'provider_used': actual_provider_name,
+             'neuroswitch_active': neuroswitch_active,
+             'fallback_reason': fallback_reason,
+             'token_usage': {'total_tokens': assistant.total_tokens_used, 'max_tokens': Config.MAX_CONVERSATION_TOKENS}
+         }), 200
+    except Exception as e:
+         logging.exception(f"Unexpected error creating provider '{actual_provider_name}'")
+         return jsonify({
+             'response': f"Error: An unexpected error occurred while setting up the AI provider.",
+             'thinking': False,
+             'tool_name': None,
+             'provider_used': actual_provider_name,
+             'neuroswitch_active': neuroswitch_active,
+             'fallback_reason': fallback_reason,
+             'token_usage': {'total_tokens': assistant.total_tokens_used, 'max_tokens': Config.MAX_CONVERSATION_TOKENS}
+         }), 200
     
     try:
-        # Call the refactored assistant.chat with the selected provider
-        result = assistant.chat(message_content, provider)
-        
+        # Call assistant.chat, PASSING the mode
+        result = assistant.chat(message_content, provider, mode=mode)
         response_text = result.get('response', "[No response text received]")
-        tool_name = result.get('tool_name') # Get tool name from the result dict
-
-        # Get current token usage from assistant
+        tool_name = result.get('tool_name')
         token_usage = {
             'total_tokens': assistant.total_tokens_used,
             'max_tokens': Config.MAX_CONVERSATION_TOKENS
         }
         
+        # Return success response with status fields
         return jsonify({
             'response': response_text,
-            'thinking': False, # Thinking state is handled within assistant now
+            'thinking': False,
             'tool_name': tool_name,
+            'provider_used': actual_provider_name,
+            'neuroswitch_active': neuroswitch_active,
+            'fallback_reason': fallback_reason,
             'token_usage': token_usage
         })
         
@@ -116,8 +162,11 @@ def chat():
             'response': f"Error processing chat: {str(e)}",
             'thinking': False,
             'tool_name': None,
+            'provider_used': actual_provider_name,
+            'neuroswitch_active': neuroswitch_active,
+            'fallback_reason': fallback_reason,
             'token_usage': {'total_tokens': assistant.total_tokens_used, 'max_tokens': Config.MAX_CONVERSATION_TOKENS}
-        }), 200 # Return 200 for frontend handling
+        }), 200
 
 @app.route('/upload', methods=['POST'])
 def upload_file():

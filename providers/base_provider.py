@@ -3,7 +3,13 @@ from typing import List, Dict, Any
 from config import Config
 
 class BaseProvider(ABC):
-    """Abstract base class for AI providers."""
+    """Abstract base class for all AI providers."""
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """Return the unique name of the provider (e.g., 'ClaudeProvider')."""
+        pass
 
     @abstractmethod
     def chat(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]], config: Config) -> Dict[str, Any]:
