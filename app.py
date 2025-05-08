@@ -94,6 +94,11 @@ def chat():
         text_input_for_classification = message # Use the whole message if no image
 
     # --- NeuroSwitch Logic ---    
+    # Add debugging logs here
+    logging.info(f"DEBUG: Value retrieved from session['provider']: '{provider_selection}'")
+    logging.info(f"DEBUG: Value of NEUROSWITCH_PROVIDER_NAME constant: '{NEUROSWITCH_PROVIDER_NAME}'")
+    logging.info(f"DEBUG: Result of comparison (provider_selection == NEUROSWITCH_PROVIDER_NAME): {provider_selection == NEUROSWITCH_PROVIDER_NAME}")
+    
     if provider_selection == NEUROSWITCH_PROVIDER_NAME:
         logging.info(f"NeuroSwitch activated. Classifying input...")
         # Call the classifier function - now returns a dict

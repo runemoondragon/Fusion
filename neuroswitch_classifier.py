@@ -1,8 +1,26 @@
 import requests
-import os
 import logging
+import os
 
-# Candidate Labels for NeuroSwitch Classification
+print("--- neuroswitch_classifier.py: Module Execution START ---")
+
+# Configure basic logging for this module specifically
+# This will help ensure its INFO messages are seen during import, even if app.py configures logging later.
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler() # Ensure output to console
+    ]
+)
+
+print("--- neuroswitch_classifier.py: Basic logging configured ---")
+
+# import requests # Removed as it\'s no longer needed for local inference
+# from transformers import pipeline, AutoModelForSequenceClassification, AutoTokenizer # Moved
+# from transformers.pipelines import ZeroShotClassificationPipeline # Moved
+
+# --- Constants for NeuroSwitch ---
 CANDIDATE_LABELS = [
     "image generation",
     "data analysis",
@@ -27,23 +45,25 @@ CANDIDATE_LABELS = [
     "general question"
 ]
 
-# Label-to-Provider Mapping
+# Mapping from classified labels to provider names (ensure these match your actual provider identifiers)
 LABEL_PROVIDER_MAP = {
-     # Gemini’s domain
-    "image generation": "gemini",
+    # Gemini's domain
+    "weather forecast": "gemini",
     "recipe suggestion": "gemini",
     "travel planning": "gemini",
     "personal assistant task": "gemini",
+    "translation": "gemini",
+    "general question": "gemini",
 
-    # Claude’s domain
+    # Claude's domain
+    "text summarization": "claude",
     "legal document review": "claude",
+    "sentiment analysis": "claude",
     "health advice": "claude",
     "historical fact": "claude",
-    "general question": "claude",
-    "text summarization": "claude",
-    "grammar checking": "claude",
 
-    # OpenAI’s domain
+    # OpenAI's domain
+    "image generation": "openai",
     "data analysis": "openai",
     "programming help": "openai",
     "code generation": "openai",
@@ -51,169 +71,115 @@ LABEL_PROVIDER_MAP = {
     "math problem solving": "openai",
     "SEO analysis": "openai",
     "product recommendation": "openai",
-    "translation": "openai",
-    "sentiment analysis": "openai",
+    "grammar checking": "openai",
     "financial forecasting": "openai",
 
     # fallback
     "unknown": "claude"
 }
 
-DEFAULT_PROVIDER = "claude" # Fallback if anything goes wrong
+DEFAULT_PROVIDER = "claude"  # Fallback provider if NeuroSwitch fails or input is empty
 
-class HuggingFaceClassifier:
-    """
-    Uses Hugging Face Inference API for zero-shot text classification.
-    Requires HF_API_KEY environment variable.
-    """
-    def __init__(self):
-        # Using facebook/bart-large-mnli as specified
-        self.api_url = "https://api-inference.huggingface.co/models/facebook/bart-large-mnli"
-        api_key = os.getenv('HF_API_KEY')
-        if not api_key:
-            logging.error("HF_API_KEY environment variable not set!")
-            # Raise an error or handle this case appropriately
-            raise ValueError("Hugging Face API Key (HF_API_KEY) not found in environment.")
-            
-        self.headers = {"Authorization": f"Bearer {api_key}"}
-        logging.info("HuggingFaceClassifier initialized.")
+# --- Pipeline Initialization ---
+classifier_pipeline = None # Explicitly None initially
+MODEL_NAME = "facebook/bart-large-mnli"
 
-    def classify(self, user_input: str, labels: list[str]) -> str:
-        """
-        Classifies the user input against the provided candidate labels.
-
-        Args:
-            user_input: The text to classify.
-            labels: A list of candidate labels.
-
-        Returns:
-            The label with the highest score, or "unknown" if classification fails.
-        """
-        if not user_input or not labels:
-            logging.warning("Classifier called with empty input or labels.")
-            print("[NeuroSwitch Console] Classifier called with empty input or labels.") 
-            return "unknown"
-            
-        payload = {
-            "inputs": user_input,
-            "parameters": {
-                "candidate_labels": labels,
-                "multi_label": False # Assume single best label for routing
-            }
-        }
-        logging.debug(f"Sending payload to HF API: {payload}")
-        print(f"[NeuroSwitch Console] Sending payload to HF API: {payload}") 
-        try:
-            response = requests.post(self.api_url, headers=self.headers, json=payload, timeout=30)
-            response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
-            result = response.json()
-            logging.debug(f"Received result from HF API: {result}")
-            print(f"[NeuroSwitch Console] Received result from HF API: {result}") 
-
-            # Check the expected structure
-            if isinstance(result, dict) and 'labels' in result and 'scores' in result:
-                 if result['labels'] and result['scores']:
-                     # The API returns labels sorted by score, highest first
-                     top_label = result['labels'][0]
-                     top_score = result['scores'][0]
-                     logging.info(f"Classification result: Label='{top_label}', Score={top_score:.4f}")
-                     print(f"[NeuroSwitch Console] Classification result: Label='{top_label}', Score={top_score:.4f}") 
-                     return top_label
-                 else:
-                     logging.warning("HF API returned empty labels or scores list.")
-                     print("[NeuroSwitch Console] HF API returned empty labels or scores list.") 
-                     return "unknown"
-            elif isinstance(result, dict) and 'error' in result:
-                logging.error(f"HF API Error: {result['error']}")
-                print(f"[NeuroSwitch Console] HF API Error: {result['error']}") 
-                return "unknown"
-            else:
-                 logging.error(f"Unexpected response format from HF API: {result}")
-                 print(f"[NeuroSwitch Console] Unexpected response format from HF API: {result}") 
-                 return "unknown"
-
-        except requests.exceptions.Timeout:
-            logging.error(f"HF API request timed out after 30 seconds.")
-            print("[NeuroSwitch Console] HF API request timed out after 30 seconds.") 
-            return "unknown"
-        except requests.exceptions.RequestException as e:
-            logging.error(f"HTTP Request failed: {e}")
-            print(f"[NeuroSwitch Console] HTTP Request failed: {e}") 
-            return "unknown"
-        except Exception as e:
-            logging.exception(f"Error during classification request: {e}")
-            print(f"[NeuroSwitch Console] Error during classification request: {e}") 
-            return "unknown"
-
-# --- Main Function for NeuroSwitch ---
-
-# Initialize the classifier once when the module is loaded
+print(f"--- neuroswitch_classifier.py: Attempting to initialize pipeline for {MODEL_NAME} ---")
 try:
-    classifier_instance = HuggingFaceClassifier()
-except ValueError as e:
-    logging.error(f"Failed to initialize classifier: {e}. NeuroSwitch will be disabled.")
-    classifier_instance = None # Set to None if initialization fails
+    print("--- neuroswitch_classifier.py: Importing transformers... ---")
+    from transformers import pipeline
+    from transformers.pipelines import ZeroShotClassificationPipeline # Import here
+    print("--- neuroswitch_classifier.py: Transformers imported. Creating pipeline... ---")
+    
+    # Ensure pipeline type hint matches the imported class
+    classifier_pipeline: ZeroShotClassificationPipeline | None = None 
+
+    logging.info(f"(Log) Initializing local zero-shot pipeline with model: {MODEL_NAME}...")
+    classifier_pipeline = pipeline("zero-shot-classification", model=MODEL_NAME, use_auth_token=False, token=None)
+    print("--- neuroswitch_classifier.py: Pipeline CREATED successfully! ---")
+    logging.info(f"(Log) Local zero-shot pipeline initialized successfully.")
+
+except ImportError as e:
+    print(f"--- neuroswitch_classifier.py: ERROR during import: {e} ---") # Print error
+    logging.error(f"Failed to initialize pipeline: Missing libraries (transformers/torch/tensorflow?). Error: {e}")
+    classifier_pipeline = None
+except Exception as e:
+    print(f"--- neuroswitch_classifier.py: ERROR during pipeline creation: {e} ---") # Print error
+    logging.exception(f"Failed to initialize local zero-shot pipeline: {e}")
+    classifier_pipeline = None
+
+print("--- neuroswitch_classifier.py: End of initialization block ---")
 
 def get_neuroswitch_provider(text_input: str) -> dict:
     """
-    Classifies the input text and returns a dictionary containing the 
+    Classifies the input text using a local zero-shot model and returns the
     selected provider name and the NeuroSwitch status.
 
     Args:
-        text_input: The user's message text.
+        text_input: The user\'s query.
 
     Returns:
-        A dictionary like:
-        {
-            "provider": "claude", 
-            "neuroswitch_active": True, 
-            "fallback_reason": None
-        }
-        or
-        {
-            "provider": "claude", 
-            "neuroswitch_active": False, 
-            "fallback_reason": "API key not configured"
-        }
+        A dictionary containing:
+            "provider": The name of the selected AI provider.
+            "neuroswitch_active": Boolean indicating if classification was successful.
+            "fallback_reason": String explaining why fallback occurred, if any.
     """
-    # Initialize status dictionary
     status = {
         "provider": DEFAULT_PROVIDER,
-        "neuroswitch_active": False,
+        "neuroswitch_active": False,  # Assume inactive unless classification succeeds
         "fallback_reason": None
     }
-    
-    if not classifier_instance:
-        reason = "HF_API_KEY not configured or classifier failed to initialize"
-        logging.warning(f"NeuroSwitch disabled: {reason}. Request routed to default: {DEFAULT_PROVIDER}")
+
+    # Check if pipeline failed to load
+    if classifier_pipeline is None:
+        reason = f"Local classifier pipeline ({MODEL_NAME}) failed to initialize."
+        # Keep warning for actual issues
+        logging.warning(f"NeuroSwitch disabled: {reason}. Request routed to default: {DEFAULT_PROVIDER}") 
         status["fallback_reason"] = reason
-        return status # Return immediately with default provider and inactive status
-        
-    if not text_input:
-        logging.info("NeuroSwitch received empty input, using default provider.")
-        # Treat as inactive as no classification happened, but no error reason
-        status["neuroswitch_active"] = False 
         return status
 
-    logging.info(f"NeuroSwitch classifying input: '{text_input[:100]}...'")
+    if not text_input:
+        # Use print for this info level message
+        print(f"--- NeuroSwitch: Received empty input, using default provider: {DEFAULT_PROVIDER} ---") 
+        # logging.info("NeuroSwitch received empty input, using default provider.") # Replaced
+        status["neuroswitch_active"] = False
+        return status
     
+    # Use print for this info level message
+    print(f"--- NeuroSwitch: Classifying locally: '{text_input[:100]}...' ---") 
+    # logging.info(f"NeuroSwitch classifying locally: '{text_input[:100]}...'") # Replaced
+    classified_label = "unknown"
+
     try:
-        # Perform classification
-        classified_label = classifier_instance.classify(text_input, CANDIDATE_LABELS)
+        result = classifier_pipeline(text_input, CANDIDATE_LABELS, multi_label=False)
         
-        # Map the label to a provider
+        # Use print for the detailed raw output
+        print(f"--- NeuroSwitch: RAW classification result object: {result} ---") 
+        # logging.info(f"NeuroSwitch RAW classification result object: {result}") # Replaced
+
+        if result and 'labels' in result and result['labels'] and 'scores' in result and result['scores']:
+            classified_label = result['labels'][0]
+            top_score = result['scores'][0]
+            status["neuroswitch_active"] = True
+            # Use print for the top pick info
+            print(f"--- NeuroSwitch: Local classification TOP PICK: Label='{classified_label}', Score={top_score:.4f} ---") 
+            # logging.info(f"Local classification TOP PICK: Label='{classified_label}', Score={top_score:.4f}") # Replaced
+        else:
+            # Keep warning for actual issues
+            logging.warning(f"Local classification pipeline returned unexpected or incomplete result: {result}") 
+            status["fallback_reason"] = "Classification returned no labels or scores."
+
         selected_provider = LABEL_PROVIDER_MAP.get(classified_label, DEFAULT_PROVIDER)
-        
         status["provider"] = selected_provider
-        status["neuroswitch_active"] = True # Classification was successful
-        logging.info(f"NeuroSwitch classified as '{classified_label}', routing to provider: '{selected_provider}'")
-        
+        # Use print for routing info
+        print(f"--- NeuroSwitch: Routing to provider: '{selected_provider}' based on label '{classified_label}' ---") 
+        # logging.info(f"NeuroSwitch routing to provider: '{selected_provider}' based on label '{classified_label}'") # Replaced
+
     except Exception as e:
-        # Log the exception from the classification attempt
-        logging.exception("NeuroSwitch classification failed.") 
-        reason = f"Classification failed: {str(e)}"
+        # Keep exception logging
+        logging.exception("NeuroSwitch local classification failed.") 
+        reason = f"Local classification failed: {str(e)}"
         status["fallback_reason"] = reason
-        # Keep provider as DEFAULT_PROVIDER and neuroswitch_active as False
-        logging.warning(f"NeuroSwitch fallback: {reason}. Using default: {DEFAULT_PROVIDER}")
-        
+        status["provider"] = DEFAULT_PROVIDER
+
     return status 
