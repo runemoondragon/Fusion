@@ -14,6 +14,7 @@ import os
 import json
 import sys
 import logging
+import context_sanitizer  # Add this import at the top
 
 from config import Config
 from tools.base import BaseTool
@@ -389,7 +390,7 @@ class Assistant:
                 "content": user_input 
             })
 
-            max_turns = 5 # Safety break for tool loops
+            max_turns = 10 # Safety break for tool loops
             turn_count = 0
 
             # Start conversation loop (handles potential tool calls)
@@ -414,6 +415,16 @@ class Assistant:
                 # --- Modified Mode Injection Logic --- 
                 messages_to_send = list(current_turn_history) # Work with turn-specific history copy
                 provider_name = provider.name # Get the actual provider's name
+                # Normalize provider_name for sanitizer
+                provider_name_map = {
+                    'claudeprovider': 'claude',
+                    'openaiprovider': 'openai',
+                    'geminiprovider': 'gemini',
+                    'claude': 'claude',
+                    'openai': 'openai',
+                    'gemini': 'gemini',
+                }
+                canonical_provider_name = provider_name_map.get(provider_name.lower(), provider_name.lower())
                 logging.info(f"Processing turn {turn_count} with provider: {provider_name}, Mode: {mode}")
 
                 # Inject mode prompt ONLY if:
@@ -428,6 +439,9 @@ class Assistant:
                      logging.info("Skipping mode prompt injection because previous message was a tool result.")
                 # --- END Mode Injection Logic ---
 
+                # --- Sanitize history for the provider ---
+                sanitized_messages = context_sanitizer.sanitize_history(messages_to_send, canonical_provider_name)
+
                 # Show thinking indicator
                 live_spinner = None
                 if self.thinking_enabled and self.console: # Check console exists for CLI use
@@ -438,7 +452,7 @@ class Assistant:
                 try:
                      # Call the provider's chat method
                      api_response = provider.chat(
-                         messages=messages_to_send, 
+                         messages=sanitized_messages, 
                          tools=self.tools,
                          config=Config
                      )

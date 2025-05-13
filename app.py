@@ -59,9 +59,10 @@ def chat():
     message = data.get('message', '')
     image_data = data.get('image')
     mode = data.get('mode')
-    
-    provider_selection = session.get('provider', DEFAULT_PROVIDER)
-    logging.info(f"User selected provider: {provider_selection}, Mode: {mode}")
+    # --- Get model preference from request body first, then session ---
+    requested_model = data.get('model') # Get model directly from request
+    provider_selection = requested_model or session.get('provider', DEFAULT_PROVIDER) # Prioritize requested_model
+    logging.info(f"Model/Provider requested: {requested_model} (from request), {session.get('provider')} (from session) -> Using: {provider_selection}, Mode: {mode}")
 
     actual_provider_name = DEFAULT_PROVIDER
     neuroswitch_active = False # Default to inactive

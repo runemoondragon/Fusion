@@ -22,36 +22,28 @@ class ClaudeProvider(BaseProvider):
         """Send chat request to Claude API."""
         self.logger.debug(f"Sending request to Claude with {len(messages)} messages and {len(tools)} tools.")
         
-        # --- ADDED: Preprocess messages to remove tool_name from user tool_result blocks --- 
+        # TEMPORARY: Remove 'tool_name' from tool_result blocks in user messages
         processed_messages = []
         for msg in messages:
             if msg.get('role') == 'user' and isinstance(msg.get('content'), list):
                 new_content = []
-                processed = False
                 for item in msg['content']:
                     if isinstance(item, dict) and item.get('type') == 'tool_result' and 'tool_name' in item:
-                        # Create a copy without 'tool_name'
                         filtered_item = {k: v for k, v in item.items() if k != 'tool_name'}
                         new_content.append(filtered_item)
-                        processed = True
                     else:
-                        new_content.append(item) # Keep other items as is
-                if processed:
-                    # Create a new message dict with the filtered content
-                    processed_messages.append({'role': msg['role'], 'content': new_content})
-                else:
-                    processed_messages.append(msg) # No changes needed for this message
+                        new_content.append(item)
+                processed_messages.append({'role': msg['role'], 'content': new_content})
             else:
-                processed_messages.append(msg) # Keep non-user or non-list-content messages as is
-        # --- END Preprocessing --- 
-        
+                processed_messages.append(msg)
+
         try:
             response = self.client.messages.create(
                 model=config.MODEL,
                 max_tokens=config.MAX_TOKENS,
                 temperature=config.DEFAULT_TEMPERATURE,
                 system=self._get_system_prompt(),
-                messages=processed_messages, # <<< USE PROCESSED MESSAGES
+                messages=processed_messages, # Use filtered messages
                 tools=tools,
                 tool_choice={"type": "auto"}
             )

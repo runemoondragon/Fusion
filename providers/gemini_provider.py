@@ -253,7 +253,7 @@ class GeminiProvider(BaseProvider):
         # The history should contain previous turns
         if not gemini_history:
              return {'content': [{'type': 'text', 'text': 'Cannot send empty message history to Gemini.'}], 'usage': {'input_tokens': 0, 'output_tokens': 0}, 'stop_reason': 'error'}
-             
+        
         # Note: Gemini API structure might prefer a conversational chat session
         # chat_session = self.model.start_chat(history=gemini_history[:-1]) # History excluding last message
         # response = chat_session.send_message(gemini_history[-1]['parts'], tools=gemini_tools)

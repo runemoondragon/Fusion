@@ -188,10 +188,6 @@ class OpenAIProvider(BaseProvider):
                 'stop_reason': 'error'
             }
 
-        # --- Normalize message blocks for OpenAI only ---
-        messages = self._normalize_message_blocks(messages)
-        # --- End normalization ---
-
         # Extract system prompt if present (OpenAI prefers it separate)
         system_prompt = None
         user_messages = []
