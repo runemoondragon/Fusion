@@ -60,9 +60,24 @@ def chat():
     image_data = data.get('image')
     mode = data.get('mode')
     # --- Get model preference from request body first, then session ---
-    requested_model = data.get('model') # Get model directly from request
-    provider_selection = requested_model or session.get('provider', DEFAULT_PROVIDER) # Prioritize requested_model
-    logging.info(f"Model/Provider requested: {requested_model} (from request), {session.get('provider')} (from session) -> Using: {provider_selection}, Mode: {mode}")
+    requested_model = data.get('model')  # Get model directly from request
+    session_provider = session.get('provider')
+    
+    # Check if this is an API call by looking at headers
+    is_api_call = request.headers.get('Content-Type') == 'application/json' and \
+                 request.headers.get('Accept') == 'application/json'
+    
+    # Determine provider selection logic
+    if is_api_call:
+        # For API calls:
+        # - If model is null, use NeuroSwitch
+        # - If model is set, use that provider
+        provider_selection = NEUROSWITCH_PROVIDER_NAME if requested_model is None else requested_model
+    else:
+        # For internal chat, maintain existing behavior
+        provider_selection = requested_model or session_provider or DEFAULT_PROVIDER
+
+    logging.info(f"Request type: {'API' if is_api_call else 'Browser'}, Model/Provider requested: {requested_model} (from request), {session_provider} (from session) -> Using: {provider_selection}, Mode: {mode}")
 
     actual_provider_name = DEFAULT_PROVIDER
     neuroswitch_active = False # Default to inactive
@@ -146,9 +161,13 @@ def chat():
         result = assistant.chat(message_content, provider, mode=mode)
         response_text = result.get('response', "[No response text received]")
         tool_name = result.get('tool_name')
+        usage = result.get('usage', {})
         token_usage = {
+            'input_tokens': usage.get('input_tokens'),
+            'output_tokens': usage.get('output_tokens'),
             'total_tokens': assistant.total_tokens_used,
-            'max_tokens': Config.MAX_CONVERSATION_TOKENS
+            'max_tokens': Config.MAX_CONVERSATION_TOKENS,
+            'runtime': usage.get('runtime')
         }
         
         # Return success response with status fields

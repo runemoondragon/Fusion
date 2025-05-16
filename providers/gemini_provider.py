@@ -2,6 +2,7 @@ from typing import List, Dict, Any
 import logging
 import os
 import json
+import time
 
 # Attempt to import the google.generativeai library
 try:
@@ -241,7 +242,7 @@ class GeminiProvider(BaseProvider):
         if not self.model:
             return {
                 'content': [{'type': 'text', 'text': 'Gemini client not configured (check API key?). Cannot process request.'}],
-                'usage': {'input_tokens': 0, 'output_tokens': 0},
+                'usage': {'input_tokens': 0, 'output_tokens': 0, 'runtime': 0.0},
                 'stop_reason': 'error'
             }
         
@@ -259,6 +260,7 @@ class GeminiProvider(BaseProvider):
         # response = chat_session.send_message(gemini_history[-1]['parts'], tools=gemini_tools)
         # Simpler approach for now: send full history directly if supported
         try:
+            start_time = time.time()
             response = self.model.generate_content(
                 gemini_history, 
                 tools=gemini_tools,
@@ -269,6 +271,8 @@ class GeminiProvider(BaseProvider):
                      temperature=config.DEFAULT_TEMPERATURE
                  )
             )
+            end_time = time.time()
+            runtime = end_time - start_time
 
             # Extract content and usage
             response_content = []
@@ -323,9 +327,11 @@ class GeminiProvider(BaseProvider):
             # Prepare final usage dictionary
             usage_dict = {
                 'input_tokens': input_token_count,
-                'output_tokens': output_token_count
+                'output_tokens': output_token_count,
+                'runtime': runtime
             }
 
+            self.logger.debug(f"Gemini usage: input_tokens={input_token_count}, output_tokens={output_token_count}, runtime={runtime}")
             return {
                 'content': response_content,
                 'usage': usage_dict,

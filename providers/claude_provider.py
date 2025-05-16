@@ -1,6 +1,7 @@
 import anthropic
 from typing import List, Dict, Any
 import logging
+import time
 
 from .base_provider import BaseProvider
 from config import Config
@@ -38,6 +39,7 @@ class ClaudeProvider(BaseProvider):
                 processed_messages.append(msg)
 
         try:
+            start_time = time.time()
             response = self.client.messages.create(
                 model=config.MODEL,
                 max_tokens=config.MAX_TOKENS,
@@ -47,14 +49,21 @@ class ClaudeProvider(BaseProvider):
                 tools=tools,
                 tool_choice={"type": "auto"}
             )
+            end_time = time.time()
+            runtime = end_time - start_time
             self.logger.debug(f"Received response from Claude. Stop reason: {response.stop_reason}")
+            self.logger.debug(f"Claude usage: input_tokens={response.usage.input_tokens}, output_tokens={response.usage.output_tokens}, runtime={runtime}")
             # Convert the response object to a dictionary for consistent return type
             # The exact structure needed depends on how Assistant processes it later.
             # For now, return the raw object's __dict__ or relevant parts.
             # Need to ensure 'content' and 'usage' keys are present or mapped.
             response_dict = {
                 'content': response.content,
-                'usage': {'input_tokens': response.usage.input_tokens, 'output_tokens': response.usage.output_tokens},
+                'usage': {
+                    'input_tokens': response.usage.input_tokens,
+                    'output_tokens': response.usage.output_tokens,
+                    'runtime': runtime
+                },
                 'stop_reason': response.stop_reason,
                 # Add other relevant fields if needed
                 'id': response.id,

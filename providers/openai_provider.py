@@ -2,6 +2,7 @@ from typing import List, Dict, Any
 import logging
 import os
 import json
+import time
 
 # Attempt to import the openai library
 try:
@@ -184,7 +185,7 @@ class OpenAIProvider(BaseProvider):
         if not self.client:
             return {
                 'content': [{'type': 'text', 'text': 'OpenAI API key not configured. Cannot process request.'}],
-                'usage': {'input_tokens': 0, 'output_tokens': 0},
+                'usage': {'input_tokens': 0, 'output_tokens': 0, 'runtime': 0.0},
                 'stop_reason': 'error'
             }
 
@@ -228,9 +229,11 @@ class OpenAIProvider(BaseProvider):
             request_params["system"] = system_prompt
 
         try:
+            start_time = time.time()
             # Make the API call
             response = self.client.chat.completions.create(**request_params)
-
+            end_time = time.time()
+            runtime = end_time - start_time
             response_message = response.choices[0].message
             finish_reason = response.choices[0].finish_reason
 
@@ -238,7 +241,8 @@ class OpenAIProvider(BaseProvider):
             usage_data = response.usage
             usage_dict = {
                 'input_tokens': getattr(usage_data, 'prompt_tokens', 0),
-                'output_tokens': getattr(usage_data, 'completion_tokens', 0)
+                'output_tokens': getattr(usage_data, 'completion_tokens', 0),
+                'runtime': runtime
             }
             self.logger.debug(f"Received response from OpenAI. Finish reason: {finish_reason}")
 
@@ -273,6 +277,7 @@ class OpenAIProvider(BaseProvider):
                              "text": f"[Error processing tool call {tool_call.function.name}]"
                         })
 
+            self.logger.debug(f"OpenAI usage: input_tokens={usage_dict['input_tokens']}, output_tokens={usage_dict['output_tokens']}, runtime={runtime}")
             return {
                 'content': response_content, # Return list similar to Claude
                 'usage': usage_dict,

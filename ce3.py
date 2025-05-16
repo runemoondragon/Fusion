@@ -610,14 +610,14 @@ class Assistant:
                  if not any(msg['role'] == 'user' and msg['content'] == user_input for msg in self.conversation_history):
                      self.conversation_history.insert(max(0, len(self.conversation_history)-1), {"role": "user", "content": user_input}) 
 
-            return {'response': final_response_text, 'tool_name': last_tool_name}
+            return {'response': final_response_text, 'tool_name': last_tool_name, 'usage': usage}
 
         except ConnectionError as e:
              logging.error(f"Connection Error in chat: {e}")
-             return {'response': f"Error communicating with AI provider: {e}", 'tool_name': None}
+             return {'response': f"Error communicating with AI provider: {e}", 'tool_name': None, 'usage': {}}
         except Exception as e:
             logging.exception("Error during chat processing")
-            return {'response': f"An unexpected error occurred: {str(e)}", 'tool_name': None}
+            return {'response': f"An unexpected error occurred: {str(e)}", 'tool_name': None, 'usage': {}}
 
     def reset(self):
         """
