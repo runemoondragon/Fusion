@@ -20,4 +20,5 @@ class Config:
     # Assistant Configuration
     ENABLE_THINKING = True
     SHOW_TOOL_USAGE = True
+    SHOW_TOKEN_USAGE = True
     DEFAULT_TEMPERATURE = 0.7

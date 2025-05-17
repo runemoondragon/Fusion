@@ -3,6 +3,7 @@ import os
 import json
 from typing import Union, List, Dict
 from pathlib import Path
+import logging # Added for logging
 
 class FileCreatorTool(BaseTool):
     name = "filecreatortool"
@@ -110,15 +111,81 @@ class FileCreatorTool(BaseTool):
         Returns:
             str: JSON string containing results of file creation operations
         """
-        files = kwargs.get('files', [])
-        if isinstance(files, dict):
-            files = [files]
+        files_arg_value = kwargs.get('files')
+
+        # Gemini-specific correction for over-nesting
+        if (isinstance(files_arg_value, dict) and
+           len(files_arg_value) == 1 and
+           'files' in files_arg_value and
+           (isinstance(files_arg_value['files'], dict) or isinstance(files_arg_value['files'], list))):
+            
+            potential_actual_specs = files_arg_value['files']
+            is_single_spec_like = (isinstance(potential_actual_specs, dict) and
+                                   'path' in potential_actual_specs and
+                                   'content' in potential_actual_specs) # content can be an empty string or dict
+            
+            is_list_of_specs_like = False
+            if isinstance(potential_actual_specs, list):
+                if not potential_actual_specs: # Empty list is a valid structure for 'files' to mean no files
+                    is_list_of_specs_like = True
+                elif (potential_actual_specs and # Ensure list is not empty before accessing [0]
+                      isinstance(potential_actual_specs[0], dict) and
+                      'path' in potential_actual_specs[0] and
+                      'content' in potential_actual_specs[0]):
+                    is_list_of_specs_like = True
+
+            if is_single_spec_like or is_list_of_specs_like:
+                try:
+                    logger = getattr(self, 'logger', logging.getLogger(__name__))
+                    logger.info(
+                        "FileCreatorTool: Correcting over-nested 'files' argument (Gemini-specific)."
+                    )
+                except Exception: # Broad exception to ensure logging doesn't break execution
+                    print("FileCreatorTool: Correcting over-nested 'files' argument (logging failed).")
+                files_arg_value = potential_actual_specs
+
+        processed_file_specs = []
+        if files_arg_value is None:
+            processed_file_specs = []
+        elif isinstance(files_arg_value, dict):
+            processed_file_specs = [files_arg_value]
+        elif isinstance(files_arg_value, list):
+            processed_file_specs = files_arg_value
+        else:
+            return json.dumps({
+                'created_files': 0, 'failed_files': 1,
+                'results': [{'path': None, 'success': False, 'error': f"Invalid type for 'files' argument: {type(files_arg_value)}"}]
+            }, indent=2)
 
         results = []
-        for file_spec in files:
+        if not processed_file_specs:
+            results.append({
+                'path': None,
+                'success': False,
+                'error': "No file specifications provided or argument was invalid."
+            })
+        
+        for file_spec in processed_file_specs:
+            path_str = None 
             try:
-                path = Path(file_spec['path'])
-                content = file_spec['content']
+                if not isinstance(file_spec, dict):
+                    results.append({'path': None, 'success': False, 'error': f'Invalid file spec type: {type(file_spec)}. Expected dict.'})
+                    continue
+
+                path_str = file_spec.get('path')
+                content = file_spec.get('content') 
+
+                if not path_str:
+                    results.append({'path': None, 'success': False, 'error': "Missing 'path' in file spec."})
+                    continue
+                
+                # 'content' is required by the schema for each file item.
+                # It can be an empty string or an empty dict, but not None.
+                if content is None:
+                     results.append({'path': path_str, 'success': False, 'error': "Missing 'content' in file spec."})
+                     continue
+
+                path = Path(path_str)
                 binary = file_spec.get('binary', False)
                 encoding = file_spec.get('encoding', 'utf-8')
 
@@ -148,7 +215,7 @@ class FileCreatorTool(BaseTool):
 
             except Exception as e:
                 results.append({
-                    'path': str(path) if 'path' in locals() else None,
+                    'path': str(path) if 'path' in locals() and path is not None else path_str if path_str is not None else None,
                     'success': False,
                     'error': str(e)
                 })

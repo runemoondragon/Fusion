@@ -50,6 +50,9 @@ class Assistant:
     - Handling user commands such as 'refresh' and 'reset'.
     - Token usage tracking and display.
     - Tool execution based on provider responses.
+
+    This class is STATELESS regarding conversation history and total tokens.
+    These are passed in and returned by the chat method.
     """
 
     def __init__(self):
@@ -60,14 +63,12 @@ class Assistant:
         # Remove Anthropic client initialization
         # self.client = anthropic.Anthropic(api_key=Config.ANTHROPIC_API_KEY) 
 
-        self.conversation_history: List[Dict[str, Any]] = []
-        self.console = Console()
+        # STATELESS: conversation_history and total_tokens_used are removed from instance variables
+        # self.conversation_history: List[Dict[str, Any]] = [] 
+        # self.total_tokens_used = 0
 
+        self.console = Console() # For server-side logging/tool display
         self.thinking_enabled = getattr(Config, 'ENABLE_THINKING', False)
-        # Temperature might move to provider call if it varies
-        # self.temperature = getattr(Config, 'DEFAULT_TEMPERATURE', 0.7) 
-        self.total_tokens_used = 0
-
         self.tools = self._load_tools()
 
     def _execute_uv_install(self, package_name: str) -> bool:
@@ -211,6 +212,7 @@ class Assistant:
         """
         If SHOW_TOOL_USAGE is enabled, display the input and result of a tool execution.
         Handles special cases like image data and large outputs for cleaner display.
+        This method uses self.console for output and does not depend on instance history.
         """
         if not getattr(Config, 'SHOW_TOOL_USAGE', False):
             return
@@ -237,6 +239,7 @@ class Assistant:
         """
         Helper method to clean data for display by handling various data types
         and removing/replacing large content like base64 strings.
+        This method is pure and does not depend on instance history.
         """
         if isinstance(data, str):
             try:
@@ -255,8 +258,8 @@ class Assistant:
 
     def _clean_parsed_data(self, data):
         """
-        Recursively clean parsed JSON/dict data, handling nested structures
-        and replacing large data with placeholders.
+        Recursively clean parsed data, replacing large strings with placeholders.
+        This method is pure and does not depend on instance history.
         """
         if isinstance(data, dict):
             cleaned = {}
@@ -276,364 +279,342 @@ class Assistant:
             return "[base64 data omitted]"
         return data
 
-    def _execute_tool(self, tool_use):
+    def _execute_tool(self, tool_use_block: Any, current_conversation_for_tool_context: List[Dict[str, Any]]) -> str:
         """
-        Given a tool usage request (with tool name and inputs),
-        dynamically load and execute the corresponding tool.
+        Execute a tool based on the tool_use_block from the LLM.
+        Args:
+            tool_use_block: The tool use block object from the LLM (e.g., Anthropic's ToolUseBlock or similar dict).
+                            Expected to have 'name' and 'input' attributes/keys.
+            current_conversation_for_tool_context: The current conversation history, passed for potential
+                                                   context if a tool ever needs it (though tools should aim to be stateless).
+        Returns:
+            A string result from the tool execution.
         """
-        tool_name = tool_use.name
-        tool_input = tool_use.input or {}
-        tool_result = None
+        tool_name = getattr(tool_use_block, 'name', tool_use_block.get('name'))
+        tool_input = getattr(tool_use_block, 'input', tool_use_block.get('input'))
+
+        if not tool_name or tool_input is None: # tool_input can be an empty dict {} for no-arg tools
+            logging.error(f"Tool execution error: Missing name or input in tool_use_block: {tool_use_block}")
+            return "Error: Tool name or input missing in tool request."
+
+        # Find the tool definition (schema) from self.tools loaded at init
+        tool_definition = next((t for t in self.tools if t['name'] == tool_name), None)
+        if not tool_definition:
+            logging.error(f"Tool execution error: Tool '{tool_name}' not found in loaded tools.")
+            return f"Error: Tool '{tool_name}' is not available or not loaded."
 
         try:
-            module = importlib.import_module(f'tools.{tool_name}')
-            tool_instance = self._find_tool_instance_in_module(module, tool_name)
+            # Dynamically find and instantiate the tool class for execution.
+            # This assumes tool names map to modules/classes in a predictable way or are registered.
+            # For simplicity, this example attempts to find the tool instance using _find_tool_instance_in_module.
+            # In a more robust system, self.tools might store actual callable instances or factories.
+            
+            # Attempt to find the module based on common naming conventions if not directly stored.
+            # This part is heuristic and might need refinement based on actual tool module structure.
+            module_name_candidate = f"tools.{tool_name.replace('Tool', '').lower()}tool" 
+            if "duckduckgo" in tool_name: module_name_candidate = "tools.duckduckgotool" # Example for specific known tools
+            # Add more specific mappings if general convention doesn't cover all tools
 
+            tool_instance = None
+            try:
+                module = importlib.import_module(module_name_candidate)
+                tool_instance = self._find_tool_instance_in_module(module, tool_name)
+            except ImportError:
+                logging.warning(f"Could not import module {module_name_candidate} for tool {tool_name}. Trying other tools modules.")
+                # Fallback: iterate through all loaded tool modules if direct import fails (less efficient)
+                tools_path = getattr(Config, 'TOOLS_DIR', 'tools')
+                for mod_info in pkgutil.iter_modules([str(tools_path)]):
+                    if mod_info.name == 'base': continue
+                    try:
+                        module = importlib.import_module(f'tools.{mod_info.name}')
+                        tool_instance = self._find_tool_instance_in_module(module, tool_name)
+                        if tool_instance: break
+                    except ImportError:
+                        continue # Skip modules that can't be imported
+            
             if not tool_instance:
-                tool_result = f"Tool not found: {tool_name}"
-            else:
-                # Execute the tool with the provided input
-                try:
-                    result = tool_instance.execute(**tool_input)
-                    # Keep structured data intact
-                    tool_result = result
-                except Exception as exec_err:
-                    tool_result = f"Error executing tool '{tool_name}': {str(exec_err)}"
-        except ImportError:
-            tool_result = f"Failed to import tool: {tool_name}"
+                logging.error(f"Tool execution error: Could not load/find executable for tool '{tool_name}'.")
+                return f"Error: Tool '{tool_name}' could not be loaded for execution."
+
+            logging.info(f"Executing tool: {tool_name} with input: {tool_input}")
+            result = tool_instance.execute(**tool_input) # Execute the tool's method
+            
+            if Config.SHOW_TOOL_USAGE:
+                self._display_tool_usage(tool_name, tool_input, result) # Uses self.console
+            
+            return str(result) # Ensure result is a string
+
         except Exception as e:
-            tool_result = f"Error executing tool: {str(e)}"
+            logging.exception(f"Exception during execution of tool '{tool_name}'")
+            return f"Error executing tool '{tool_name}': {str(e)}"
 
-        # Display tool usage with proper handling of structured data
-        self._display_tool_usage(tool_name, tool_input, 
-            json.dumps(tool_result) if not isinstance(tool_result, str) else tool_result)
-        return tool_result
-
-    def _find_tool_instance_in_module(self, module, tool_name: str):
+    def _find_tool_instance_in_module(self, module, tool_name_to_find: str) -> BaseTool | None:
         """
-        Search a given module for a tool class matching tool_name and return an instance of it.
+        Given a tool module, find and instantiate a tool class that matches tool_name_to_find.
         """
         for name, obj in inspect.getmembers(module):
-            if (inspect.isclass(obj) and issubclass(obj, BaseTool) and obj != BaseTool):
-                candidate_tool = obj()
-                if candidate_tool.name == tool_name:
-                    return candidate_tool
-        return None
-
-    def _display_token_usage(self, usage: Dict[str, int]):
-        """
-        Display token usage. 
-        Now receives usage dict directly from the provider response processing.
-        Updates total token count.
-        """
-        input_tokens = usage.get('input_tokens', 0)
-        output_tokens = usage.get('output_tokens', 0)
-        
-        # Update total token usage
-        self.total_tokens_used += input_tokens + output_tokens
-
-        used_percentage = (self.total_tokens_used / Config.MAX_CONVERSATION_TOKENS) * 100
-        remaining_tokens = max(0, Config.MAX_CONVERSATION_TOKENS - self.total_tokens_used)
-
-        self.console.print(f"\nTokens: In={input_tokens:,}, Out={output_tokens:,} | Total: {self.total_tokens_used:,} / {Config.MAX_CONVERSATION_TOKENS:,}")
-
-        bar_width = 40
-        filled = int(used_percentage / 100 * bar_width)
-        bar = "█" * filled + "░" * (bar_width - filled)
-
-        color = "green"
-        if used_percentage > 75:
-            color = "yellow"
-        if used_percentage > 90:
-            color = "red"
-
-        self.console.print(f"[{color}][{bar}] {used_percentage:.1f}%[/{color}]")
-
-        if remaining_tokens < 20000: # Keep warning threshold
-            self.console.print(f"[bold red]Warning: Only {remaining_tokens:,} tokens remaining![/bold red]")
-
-        self.console.print("---")
-
-        # Return True if token limit is reached
-        return self.total_tokens_used >= Config.MAX_CONVERSATION_TOKENS
-
-    def chat(self, user_input, provider: BaseProvider, mode: str | None = None) -> Dict[str, Any]:
-        """
-        Process a chat message using the specified provider.
-        Orchestrates the conversation loop including tool calls and mode injection.
-        user_input can be either a string (text-only) or a list (multimodal message).
-        mode: Optional string indicating the selected operational mode.
-        Returns:
-            A dictionary containing the final response text and the name of the last tool used (if any).
-            e.g., {'response': '...', 'tool_name': '...'}
-        """
-        final_response_text = ""
-        last_tool_name = None
-        
-        # Handle special CLI commands first (only for string input)
-        if isinstance(user_input, str):
-            if user_input.lower() == 'refresh':
-                self.refresh_tools()
-                return {'response': "Tools refreshed successfully!", 'tool_name': None}
-            elif user_input.lower() == 'reset':
-                self.reset()
-                return {'response': "Conversation reset!", 'tool_name': None}
-            elif user_input.lower() == 'quit':
-                 return {'response': "Goodbye!", 'tool_name': None} # Or handle exit differently
-
-        try:
-            # Add user message to conversation history
-            # Use a copy of the history for this turn's processing to avoid persistent mode injection
-            current_turn_history = list(self.conversation_history) # Create a shallow copy
-            current_turn_history.append({
-                "role": "user",
-                "content": user_input 
-            })
-
-            max_turns = 10 # Safety break for tool loops
-            turn_count = 0
-
-            # Start conversation loop (handles potential tool calls)
-            while turn_count < max_turns:
-                turn_count += 1
-                
-                # Check token limit before calling provider
-                if self.total_tokens_used >= Config.MAX_CONVERSATION_TOKENS:
-                    self.console.print("\n[bold red]Token limit reached! Please reset the conversation.[/bold red]")
-                    return {'response': "Token limit reached! Please type 'reset' to start a new conversation.", 'tool_name': None}
-
-                # --- Determine if the last message was a tool result --- 
-                was_last_message_tool_result = False
-                if turn_count > 1 and current_turn_history: # Check if not the first turn
-                    last_msg = current_turn_history[-1]
-                    if last_msg.get('role') == 'user' and isinstance(last_msg.get('content'), list):
-                        # Check if any item in the content list is a tool_result
-                        if any(isinstance(item, dict) and item.get('type') == 'tool_result' for item in last_msg['content']):
-                            was_last_message_tool_result = True
-                            logging.info("Detected that the previous turn ended with tool results.")
-                
-                # --- Modified Mode Injection Logic --- 
-                messages_to_send = list(current_turn_history) # Work with turn-specific history copy
-                provider_name = provider.name # Get the actual provider's name
-                # Normalize provider_name for sanitizer
-                provider_name_map = {
-                    'claudeprovider': 'claude',
-                    'openaiprovider': 'openai',
-                    'geminiprovider': 'gemini',
-                    'claude': 'claude',
-                    'openai': 'openai',
-                    'gemini': 'gemini',
-                }
-                canonical_provider_name = provider_name_map.get(provider_name.lower(), provider_name.lower())
-                logging.info(f"Processing turn {turn_count} with provider: {provider_name}, Mode: {mode}")
-
-                # Inject mode prompt ONLY if:
-                # 1. Provider is NOT NeuroSwitch (handled by provider_name check)
-                # 2. A valid mode is selected
-                # 3. The PREVIOUS message was NOT a tool result (to avoid breaking sequence for providers like Claude)
-                if provider_name in ["ClaudeProvider", "OpenAIProvider", "GeminiProvider"] and mode and mode in MODE_PROMPTS and not was_last_message_tool_result:
-                    system_message = {"role": "system", "content": MODE_PROMPTS[mode]}
-                    messages_to_send.insert(0, system_message) 
-                    logging.info(f"Injected system prompt for mode: '{mode}'")
-                elif was_last_message_tool_result:
-                     logging.info("Skipping mode prompt injection because previous message was a tool result.")
-                # --- END Mode Injection Logic ---
-
-                # --- Sanitize history for the provider ---
-                sanitized_messages = context_sanitizer.sanitize_history(messages_to_send, canonical_provider_name)
-
-                # Show thinking indicator
-                live_spinner = None
-                if self.thinking_enabled and self.console: # Check console exists for CLI use
-                    live_spinner = Live(Spinner('dots', text='Thinking...', style="cyan"), 
-                                        refresh_per_second=10, transient=True, console=self.console)
-                    live_spinner.start()
-
+            if inspect.isclass(obj) and issubclass(obj, BaseTool) and obj != BaseTool:
                 try:
-                     # Call the provider's chat method
-                     api_response = provider.chat(
-                         messages=sanitized_messages, 
-                         tools=self.tools,
-                         config=Config
-                     )
-                finally:
-                    if live_spinner:
-                        live_spinner.stop()
+                    # Instantiate the tool to check its actual 'name' property/attribute
+                    tool_candidate_instance = obj()
+                    if hasattr(tool_candidate_instance, 'name') and tool_candidate_instance.name == tool_name_to_find:
+                        return tool_candidate_instance # Return the instance if names match
+                except Exception as e:
+                    # Log error if a specific tool class in the module fails to instantiate
+                    logging.error(f"Error instantiating tool class {name} from module {module.__name__} while searching for {tool_name_to_find}: {e}")
+        return None # Tool not found in this module
 
-                # Process usage info and check token limit
-                usage = api_response.get('usage', {})
-                if self._display_token_usage(usage): # display also updates total_tokens_used and returns True if limit reached
-                    return {'response': "Token limit reached during processing! Please type 'reset' to start a new conversation.", 'tool_name': last_tool_name}
+    def _display_token_usage(self, usage_this_call: Dict[str, int], cumulative_total_tokens: int):
+        """
+        Displays token usage for the current API call and the cumulative total for the session.
+        Args:
+            usage_this_call: Dict with 'input_tokens', 'output_tokens' for the current call.
+            cumulative_total_tokens: The total tokens used so far in this session.
+        """
+        if not getattr(Config, 'SHOW_TOKEN_USAGE', True): # Default to True if not set
+            return
 
-                # Extract content (might be list or other structure depending on provider)
-                response_content = api_response.get('content')
-                stop_reason = api_response.get('stop_reason') # Get stop reason if available
+        input_str = f"Input: {usage_this_call.get('input_tokens', 'N/A')}"
+        output_str = f"Output: {usage_this_call.get('output_tokens', 'N/A')}"
+        total_str = f"Total Used (Session): {cumulative_total_tokens}"
+        max_tokens_str = f"Max Allowed (Session): {Config.MAX_CONVERSATION_TOKENS}"
+        runtime_str = f"Runtime: {usage_this_call.get('runtime', 'N/A'):.2f}s" if usage_this_call.get('runtime') else ""
 
-                # --- Tool Handling Logic ---
-                tool_calls_detected = False
-                tool_results = []
-                assistant_message_content = [] # Build assistant message content list
-                potential_final_text = "" # Store text part in case it's the final response
-                
-                # Check if the response content is a list (common format now)
-                if isinstance(response_content, list):
-                     for block in response_content:
-                         # --- Provider-Specific Block Processing --- 
-                         is_tool_use = False
-                         block_type = None
-                         tool_use_id = None
-                         tool_name = None
-                         tool_input = None
-                         text_content = None
+        usage_info = f"[bold yellow]Token Usage:[/bold yellow] {input_str}, {output_str}. {total_str} / {max_tokens_str}. {runtime_str}"
+        self.console.print(Markdown(usage_info))
 
-                         if isinstance(provider, ClaudeProvider) and hasattr(block, 'type'):
-                             # Claude uses Pydantic objects with dot notation
-                             block_type = block.type
-                             if block_type == 'tool_use':
-                                 is_tool_use = True
-                                 tool_use_id = block.id
-                                 tool_name = block.name
-                                 tool_input = block.input or {}
-                             elif block_type == 'text':
-                                 text_content = block.text
-                                 potential_final_text = text_content # Store text
+    def chat(self, user_input: Any, provider: BaseProvider,
+             conversation_history: List[Dict[str, Any]],
+             total_tokens_used: int, # Current total for this session, passed in
+             mode: str | None = None,
+             request_id: str | None = None) -> Dict[str, Any]: # Optional request_id for logging
+        """
+        Processes a chat message, interacts with the provider, and handles tool use.
+        This method is STATELESS regarding history and tokens.
+        It operates on the provided conversation_history and total_tokens_used.
+        Returns a dictionary including the updated history, tokens, and response.
+        """
+        # Work on copies to avoid modifying the lists/values passed from app.py directly in this scope
+        current_conversation_history = [dict(msg) for msg in conversation_history] # Deep copy for safety
+        current_total_tokens_used = total_tokens_used
 
-                         elif isinstance(provider, (OpenAIProvider, GeminiProvider)) and isinstance(block, dict):
-                             # OpenAI/Gemini providers were implemented to return dicts
-                             block_type = block.get('type')
-                             if block_type == 'tool_use':
-                                 is_tool_use = True
-                                 tool_use_id = block.get('id')
-                                 tool_name = block.get('name')
-                                 tool_input = block.get('input', {})
-                             elif block_type == 'text':
-                                  text_content = block.get('text', '')
-                                  potential_final_text = text_content # Store text
-                         # --- End Provider-Specific Block Processing ---
+        log_prefix = f"[ID: {request_id}] " if request_id else ""
 
-                         # Add the original block to the assistant message history
-                         # (assuming providers return compatible dict/object structures for history)
-                         assistant_message_content.append(block)
+        # 1. Add user message to history
+        if isinstance(user_input, str):
+            current_conversation_history.append({"role": "user", "content": user_input})
+        elif isinstance(user_input, list): # For multi-part messages (e.g., image and text)
+            current_conversation_history.append({"role": "user", "content": user_input})
+        else:
+            # Handle other potential structured inputs if necessary, or log a warning
+            logging.warning(f"{log_prefix}Unexpected user_input type: {type(user_input)}. Converting to string.")
+            current_conversation_history.append({"role": "user", "content": str(user_input)})
 
-                         # If it was a tool use, execute it
-                         if is_tool_use:
-                             tool_calls_detected = True
-                             last_tool_name = tool_name # Track last tool used
-                             self.console.print(f"\n[bold yellow]  Executing Tool: {tool_name}[/bold yellow]\n")
-                             
-                             # Need to pass the correct object/dict to _execute_tool
-                             # _execute_tool expects an object with .name and .input attributes
-                             # Let's create a simple mock object for consistency if needed
-                             class ToolUseMock:
-                                 def __init__(self, name, input_data, id_val=None): # Add id if needed
-                                     self.name = name
-                                     self.input = input_data
-                                     self.id = id_val # Store id if available
-                             
-                             tool_use_obj = ToolUseMock(tool_name, tool_input, tool_use_id)
-                             result = self._execute_tool(tool_use_obj)
+        # 2. Token limit check for the session (early exit or truncation strategy)
+        if current_total_tokens_used >= Config.MAX_CONVERSATION_TOKENS:
+            logging.warning(f"{log_prefix}Session token limit ({Config.MAX_CONVERSATION_TOKENS}) already reached or exceeded: {current_total_tokens_used}. Not processing new message.")
+            # Optionally, implement history truncation here via context_sanitizer
+            # For now, just return an error or a message indicating limit reached.
+            return {
+                'response': "Token limit for this conversation session has been reached. Please reset the conversation or start a new one.",
+                'tool_name': None,
+                'usage': {'input_tokens': 0, 'output_tokens': 0, 'runtime': 0},
+                'updated_conversation_history': current_conversation_history, # Return current history as is
+                'updated_total_tokens_used': current_total_tokens_used
+            }
 
-                             # Format tool result for history
-                             tool_results.append({
-                                 "type": "tool_result",
-                                 "tool_use_id": tool_use_id,
-                                  "tool_name": tool_name, # Removed: Causes error for Claude API
-                                 "content": result 
-                             })
-                         # else: pass # If it's just text, we stored it in potential_final_text
-                
-                # Handle cases where the entire response might be a single string (less common now)
-                elif isinstance(response_content, str):
-                    potential_final_text = response_content
-                    # Add the simple string response to history
-                    assistant_message_content.append({"type": "text", "text": response_content}) 
-                
-                # --- End Tool Handling ---
+        # 3. Sanitize history for the specific provider
+        provider_name_simple = provider.name.lower().replace("provider", "")
+        # context_sanitizer.sanitize_history will be called before each API call within the loop
 
-                if tool_calls_detected:
-                    # Add assistant's message (containing tool_use blocks) to history
-                    self.conversation_history.append({
-                         "role": "assistant",
-                         "content": assistant_message_content 
-                     })
-                    # Add the tool results as a user message and continue loop
-                    self.conversation_history.append({
-                        "role": "user", # Role for tool results
-                        "content": tool_results
-                    })
-                    # Update current_turn_history for the next iteration of the while loop
-                    current_turn_history.append({"role": "assistant", "content": assistant_message_content })
-                    current_turn_history.append({"role": "user", "content": tool_results})
-                    continue # Continue loop to get model response after tool execution
-                else:
-                    # No tool use detected, this is the final response.
-                    # Use the text content we captured earlier.
-                    final_response_text = potential_final_text
-                    
-                    # Add the final assistant message to history
-                    self.conversation_history.append({
-                        "role": "assistant",
-                        # Store the structured content if available, otherwise the text
-                        "content": assistant_message_content if assistant_message_content else final_response_text
-                    })
+        # 4. System prompt (mode handling) - often handled by provider or by prepending to messages
+        # System prompts might be added by the provider internally or by pre-pending to message list if necessary.
+        # For instance, if MODE_PROMPTS are used, they might be injected as the first system message if provider supports it,
+        # or handled by the provider's specific `chat` implementation. This part is provider-dependent.
+        # Example: Provider's chat method might take a `system_message` argument from `MODE_PROMPTS.get(mode)`
 
-                    # Validate final response text
-                    if not final_response_text and assistant_message_content:
-                        final_response_text = "[Assistant responded with non-text content]"
-                    elif not final_response_text and not assistant_message_content:
-                         final_response_text = "[No suitable content found in response]"
-                    
-                    # Break the loop as we have the final answer
-                    break
+        # 5. Main interaction loop (for potential tool use)
+        MAX_TOOL_LOOPS = Config.MAX_TOOL_CALLS if hasattr(Config, 'MAX_TOOL_CALLS') else 5 # Default to 5 loops
+        loop_count = 0
+        last_api_response_data = {'usage': {'input_tokens': 0, 'output_tokens': 0, 'runtime': 0}} # For token/usage tracking
+        final_response_text_parts = []
+        tool_name_invoked_in_turn = None
 
-            if turn_count >= max_turns:
-                 final_response_text = "[Reached maximum tool execution turns]"
-                 self.console.print(f"[bold red]{final_response_text}[/bold red]")
+        while loop_count < MAX_TOOL_LOOPS:
+            loop_count += 1
+            logging.info(f"{log_prefix}Chat loop iteration: {loop_count}")
 
-            # --- IMPORTANT: Add the initial user message to persistent history --- 
-            # This was only added to current_turn_history before the loop
-            # We need to add it *now* to ensure it's saved even if errors occurred within the loop
-            # Find the user message added at the start of the try block
-            initial_user_message_index = -1
-            for i, msg in enumerate(reversed(current_turn_history)):
-                 if msg['role'] == 'user' and msg['content'] == user_input:
-                      # This assumes the user_input is unique enough for this turn
-                      # A more robust way might involve passing the message index or ID
-                      initial_user_message_index = len(current_turn_history) - 1 - i
-                      break 
+            # Sanitize the *current full history* for the provider before this API call
+            messages_for_api_call = context_sanitizer.sanitize_history(
+                current_conversation_history,
+                provider_name_simple
+            )
             
-            if initial_user_message_index != -1 and not any(msg['role'] == 'user' and msg['content'] == user_input for msg in self.conversation_history):
-                self.conversation_history.insert(len(self.conversation_history) - (len(current_turn_history) - 1 - initial_user_message_index), current_turn_history[initial_user_message_index])
-            elif initial_user_message_index == -1:
-                 logging.warning("Could not reliably find initial user message to add to persistent history.")
-                 # As a fallback, add it now if it seems missing
-                 if not any(msg['role'] == 'user' and msg['content'] == user_input for msg in self.conversation_history):
-                     self.conversation_history.insert(max(0, len(self.conversation_history)-1), {"role": "user", "content": user_input}) 
+            # Check token count *after* sanitization and before API call if possible (though input tokens are an estimate)
+            # This is more complex as exact input token count is usually from provider response.
+            # Primary check is at the start of `chat` and after each provider response.
 
-            return {'response': final_response_text, 'tool_name': last_tool_name, 'usage': usage}
+            try:
+                api_response = provider.chat(
+                    messages=messages_for_api_call,
+                    tools=self.tools, # List of tool schemas
+                    config=Config
+                )
+                # api_response is dict: {'content': ..., 'usage': ..., 'stop_reason': ..., etc.}
+                last_api_response_data = api_response # Store for usage and other details
 
-        except ConnectionError as e:
-             logging.error(f"Connection Error in chat: {e}")
-             return {'response': f"Error communicating with AI provider: {e}", 'tool_name': None, 'usage': {}}
-        except Exception as e:
-            logging.exception("Error during chat processing")
-            return {'response': f"An unexpected error occurred: {str(e)}", 'tool_name': None, 'usage': {}}
+                # Accumulate tokens from this call
+                call_input_tokens = api_response.get('usage', {}).get('input_tokens', 0)
+                call_output_tokens = api_response.get('usage', {}).get('output_tokens', 0)
+                current_total_tokens_used += call_input_tokens + call_output_tokens
+                
+                if Config.SHOW_TOKEN_USAGE:
+                    self._display_token_usage(api_response.get('usage', {}), current_total_tokens_used)
+
+                # Check token limit again after receiving response and updating session total
+                if current_total_tokens_used >= Config.MAX_CONVERSATION_TOKENS:
+                    logging.warning(f"{log_prefix}Session token limit ({Config.MAX_CONVERSATION_TOKENS}) reached after API call: {current_total_tokens_used}.")
+                    # Potentially truncate response or just note that limit is hit.
+                    # For now, we'll allow the current response to be processed.
+
+                response_content_list = api_response.get('content', [])
+                # Ensure content is a list, even if provider returns a single block or string
+                if not isinstance(response_content_list, list):
+                    response_content_list = [response_content_list] if response_content_list else []
+                
+                assistant_message_parts_for_history = []
+                tool_calls_requested_by_llm = []
+                text_received_this_iteration = False
+
+                for block_item in response_content_list:
+                    # Sanitize/convert provider-specific blocks (e.g., Anthropic TextBlock) to dicts
+                    block = context_sanitizer._to_dict_if_possible(block_item)
+                    
+                    if isinstance(block, dict) and block.get('type') == 'text':
+                        final_response_text_parts.append(block.get('text', ''))
+                        assistant_message_parts_for_history.append(block)
+                        text_received_this_iteration = True
+                    elif isinstance(block, dict) and block.get('type') == 'tool_use':
+                        tool_calls_requested_by_llm.append(block)
+                        assistant_message_parts_for_history.append(block) # Add tool_use to assistant message
+                        tool_name_invoked_in_turn = block.get('name', tool_name_invoked_in_turn)
+                    elif isinstance(block, str): # Handle plain string content
+                        final_response_text_parts.append(block)
+                        assistant_message_parts_for_history.append({"type": "text", "text": block})
+                        text_received_this_iteration = True
+                    else:
+                        logging.warning(f"{log_prefix}Unsupported content block type or format: {block}")
+                
+                # Add assistant's full response (text and/or tool_use blocks) to history
+                if assistant_message_parts_for_history:
+                    current_conversation_history.append({
+                        "role": "assistant",
+                        "content": assistant_message_parts_for_history
+                    })
+                elif not tool_calls_requested_by_llm: # No content and no tools, potentially an issue
+                    logging.warning(f"{log_prefix}Provider returned no text and no tool calls.")
+                    # We might break here or add a default "No response" message
+                    # If this is the first iteration and no text, it means the very first response was empty
+                    if loop_count == 1 and not final_response_text_parts:
+                        final_response_text_parts.append("[Provider returned no actionable response]")
+                    break # Exit loop if no tools and no new text parts from assistant this turn
+
+                if not tool_calls_requested_by_llm:
+                    logging.info(f"{log_prefix}No tool calls requested by LLM. Ending chat loop.")
+                    break # No tools to call, this turn is complete.
+
+                # --- Execute requested tools --- 
+                logging.info(f"{log_prefix}LLM requested {len(tool_calls_requested_by_llm)} tool(s). Executing...")
+                tool_results_content_for_history = [] # Renamed from tool_results_for_llm for clarity
+                
+                for tool_call_request_block in tool_calls_requested_by_llm:
+                    tool_use_id = tool_call_request_block.get('id')
+                    tool_name = tool_call_request_block.get('name') # Get name for each call
+                    
+                    tool_execution_result_content_str = self._execute_tool(tool_call_request_block, current_conversation_history)
+                    
+                    # Check for successful filecreatortool execution to modify LLM feedback
+                    if tool_name == "filecreatortool":
+                        try:
+                            tool_output_data = json.loads(tool_execution_result_content_str)
+                            if tool_output_data.get("created_files", 0) > 0 and tool_output_data.get("failed_files", 0) == 0:
+                                logging.info(f"{log_prefix}FileCreatorTool succeeded. Modifying feedback to LLM.")
+                                # Replace the raw JSON output with a more instructive message for the LLM
+                                # This message becomes the content of the tool_result block for this specific tool call.
+                                tool_execution_result_content_str = (
+                                    f"The file creation via '{tool_name}' was successful. "
+                                    f"Details: {json.dumps(tool_output_data)}. "
+                                    f"Please inform the user that the file has been created and do not call any more tools for this request."
+                                )
+                                # This modified string will be used in the tool_result block below.
+                        except json.JSONDecodeError:
+                            logging.warning(f"{log_prefix}Could not parse FileCreatorTool output as JSON: {tool_execution_result_content_str}")
+                        except Exception as e_fct_parse:
+                            logging.error(f"{log_prefix}Error processing FileCreatorTool output for feedback modification: {e_fct_parse}")
+
+                    tool_result_block = {
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": tool_execution_result_content_str # Use the (potentially modified) string content
+                    }
+                    tool_results_content_for_history.append(tool_result_block)
+                
+                # Add tool results to history for the next call to the LLM
+                if tool_results_content_for_history: # Only add if there are results
+                    current_conversation_history.append({
+                        "role": "user", 
+                        "content": tool_results_content_for_history
+                    })
+                    final_response_text_parts = [] 
+                    logging.info(f"{log_prefix}Added {len(tool_results_content_for_history)} tool result(s) to history. Continuing loop.")
+                else: # Should not happen if tool_calls_requested_by_llm was not empty
+                    logging.warning(f"{log_prefix}No tool results to add to history despite tool calls being requested. This might be an issue.")
+                    break # Avoid potential infinite loop if something went wrong with tool execution reporting
+
+            except Exception as e:
+                logging.exception(f"{log_prefix}Exception during provider.chat() or tool processing in loop iteration {loop_count}")
+                # Use the text gathered so far (if any) or an error message
+                text_to_return = " ".join(final_response_text_parts).strip() if final_response_text_parts else f"An error occurred during processing: {str(e)}"
+                return {
+                    'response': text_to_return,
+                    'tool_name': tool_name_invoked_in_turn,
+                    'usage': last_api_response_data.get('usage', {}),
+                    'updated_conversation_history': current_conversation_history,
+                    'updated_total_tokens_used': current_total_tokens_used
+                }
+
+            if loop_count >= MAX_TOOL_LOOPS:
+                logging.warning(f"{log_prefix}Max tool loops ({MAX_TOOL_LOOPS}) reached.")
+                if not final_response_text_parts: # If last iteration was tool call and no text yet
+                    final_response_text_parts.append("[Max tool iterations reached. No final text response from assistant.]")
+                break
+        
+        # Consolidate final text response
+        final_response_str = " ".join(final_response_text_parts).strip()
+        if not final_response_str and not tool_name_invoked_in_turn: # Check if there was truly no output
+            final_response_str = "[No response content]"
+        elif not final_response_str and tool_name_invoked_in_turn and loop_count >= MAX_TOOL_LOOPS:
+             final_response_str = "[Assistant used a tool but reached max iterations without further text response.]"
+        elif not final_response_str and tool_name_invoked_in_turn:
+             final_response_str = "[Assistant used a tool. No additional text was generated.]"
+
+        logging.info(f"{log_prefix}Chat processing complete. Final response length: {len(final_response_str)}, Total tokens for session: {current_total_tokens_used}")
+
+        return {
+            'response': final_response_str,
+            'tool_name': tool_name_invoked_in_turn, # Name of the last tool invoked in the turn
+            'usage': last_api_response_data.get('usage', {}), # Usage from the *last* successful LLM call
+            'updated_conversation_history': current_conversation_history,
+            'updated_total_tokens_used': current_total_tokens_used
+        }
 
     def reset(self):
         """
-        Reset the assistant's memory and token usage.
+        This method is now a no-op as history is managed per-session in app.py.
+        The Assistant instance itself is stateless regarding conversation history.
         """
-        self.conversation_history = []
-        self.total_tokens_used = 0
-        # Only print if console is available (for CLI)
-        if hasattr(self, 'console') and self.console:
-            self.console.print("\n[bold green]🔄 Assistant memory has been reset![/bold green]")
-
-            # Optional: Display welcome and tools for CLI (Also needs indent if uncommented)
-            # welcome_text = ...
-            # self.console.print(Markdown(welcome_text))
-            # self.display_available_tools()
-
+        # self.console.print("[yellow]Assistant.reset() called, but history is session-managed by the calling application.[/yellow]")
+        pass
 
 def main():
     """

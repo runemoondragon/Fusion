@@ -3,6 +3,7 @@ import logging
 import os
 import json
 import time
+import collections.abc # Added for Mapping type check
 
 # Attempt to import the google.generativeai library
 try:
@@ -20,6 +21,17 @@ ROLE_MAPPING = {
     "assistant": "model" 
     # System prompts are handled differently in Gemini (as of latest versions)
 }
+
+def _recursively_convert_mappings_to_dict(item: Any) -> Any:
+    """
+    Recursively converts Mapping instances (like MapComposite) in a nested structure
+    to plain Python dicts.
+    """
+    if isinstance(item, collections.abc.Mapping):
+        return {k: _recursively_convert_mappings_to_dict(v) for k, v in item.items()}
+    elif isinstance(item, list):
+        return [_recursively_convert_mappings_to_dict(i) for i in item]
+    return item
 
 class GeminiProvider(BaseProvider):
     """Provider implementation for Google's Gemini API."""
@@ -310,14 +322,19 @@ class GeminiProvider(BaseProvider):
                          elif hasattr(part, 'function_call'):
                              # Map Gemini function call to Claude-like format
                              fc = part.function_call
+                             tool_input_args = {}
+                             if hasattr(fc, 'args') and fc.args is not None:
+                                 # Use the recursive converter
+                                 tool_input_args = _recursively_convert_mappings_to_dict(fc.args)
+                             
                              response_content.append({
                                  "type": "tool_use",
                                  "id": fc.name, # Gemini doesn't seem to provide a unique ID per call like others
                                  "name": fc.name,
-                                 "input": dict(fc.args) if hasattr(fc, 'args') else {} # Convert args MapComposite to dict
+                                 "input": tool_input_args
                              })
                              # Standardize finish reason
-                             finish_reason = "tool_calls" 
+                             finish_reason = "tool_calls"
             else:
                  # Handle blocked responses
                  self.logger.warning(f"Gemini response potentially blocked. Prompt feedback: {response.prompt_feedback}")
@@ -328,6 +345,7 @@ class GeminiProvider(BaseProvider):
             usage_dict = {
                 'input_tokens': input_token_count,
                 'output_tokens': output_token_count,
+                'total_tokens': input_token_count + output_token_count,
                 'runtime': runtime
             }
 
