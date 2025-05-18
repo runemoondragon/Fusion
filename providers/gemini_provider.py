@@ -190,63 +190,38 @@ class GeminiProvider(BaseProvider):
 
     def _format_messages_for_gemini(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
          """Convert message history to Gemini's format, handling roles and content types."""
+         self.logger.debug(f"GeminiProvider: Input messages to _format_messages_for_gemini: {json.dumps(messages, indent=2)}")
          gemini_history = []
-         system_prompt = None # System prompts handled separately
-         # Potentially extract system prompt if it exists (though not standard in history)
-         # if messages and messages[0]['role'] == 'system':
-         #     system_prompt = messages[0]['content']
-         #     messages = messages[1:]
+         # system_prompt = None # System prompts handled separately (not in this function)
 
          for msg in messages:
              role = ROLE_MAPPING.get(msg['role'])
-             content = msg.get('content')
+             content_as_gemini_parts = msg.get('content') # This comes from context_sanitizer._sanitize_for_gemini
 
              if not role:
                  self.logger.warning(f"Skipping message with unmapped role: {msg['role']}")
                  continue
 
-             # Gemini expects 'parts' which is a list.
-             # Handle different content structures (string, list of blocks)
-             parts = []
-             if isinstance(content, str):
-                 parts.append({"text": content})
-             elif isinstance(content, list):
-                 # Process potential multimodal or tool result content
-                 for item in content:
-                     if isinstance(item, dict):
-                         if item.get('type') == 'text':
-                             parts.append({"text": item.get('text', '')})
-                         elif item.get('type') == 'image':
-                             # Requires image bytes or specific format, handle base64
-                             source = item.get('source', {})
-                             if source.get('type') == 'base64':
-                                 # TODO: Need image processing to convert base64 to bytes/PIL Image
-                                 self.logger.warning("Image parts not yet fully supported for Gemini base64.")
-                                 # parts.append({"inline_data": {"mime_type": source.get('media_type'), "data": base64.b64decode(source.get('data'))}})
-                         elif item.get('type') == 'tool_result':
-                              # Gemini expects FunctionResponse part for tool results
-                              parts.append({
-                                  "function_response": {
-                                      "name": item.get('tool_name'), # Needs tool_name in result? Check ce3.py
-                                      # Content might be complex, Gemini expects serializable response
-                                      "response": {"content": json.dumps(item.get('content'))}
-                                  }
-                              })
-                         elif item.get('type') == 'tool_use': # Assistant decided to use tool
-                              # Map to FunctionCall for Gemini history
-                             parts.append({
-                                 "function_call": {
-                                     "name": item.get('name'),
-                                     "args": item.get('input') # Assumes input is dict
-                                 }
-                             })
-                     elif isinstance(item, str): # Simple string in list?
-                          parts.append({"text": item})
-             
-             if parts:
-                 gemini_history.append({"role": role, "parts": parts})
-
-         # TODO: Handle system prompt if needed (passed separately to generate_content)
+            # content_as_gemini_parts should already be a list of dicts formatted for Gemini by the sanitizer
+            # (e.g., [{"text": "..."}, {"text": "[tool call redacted]"}])
+            # We validate it and ensure it's a non-empty list of such parts.
+             if isinstance(content_as_gemini_parts, list) and content_as_gemini_parts:
+                 valid_parts_for_this_message = []
+                 for part_dict in content_as_gemini_parts:
+                     if isinstance(part_dict, dict) and \
+                        any(key in part_dict for key in ['text', 'inline_data', 'function_call', 'function_response']):
+                         valid_parts_for_this_message.append(part_dict)
+                     else:
+                         self.logger.warning(f"GeminiProvider: Invalid or unexpected part structure in content for role '{role}': {part_dict}. Skipping this part.")
+                 
+                 if valid_parts_for_this_message: # Only add if we have valid parts for this message
+                     gemini_history.append({"role": role, "parts": valid_parts_for_this_message})
+                 else:
+                     self.logger.warning(f"GeminiProvider: Role '{role}' had content that resulted in no valid Gemini parts after validation: {content_as_gemini_parts}. Skipping message.")
+             else:
+                 self.logger.warning(f"GeminiProvider: Role '{role}' has empty or invalid content from sanitizer: {content_as_gemini_parts}. Skipping message.")
+         
+         self.logger.debug(f"GeminiProvider: Formatted gemini_history: {json.dumps(gemini_history, indent=2)}")
          return gemini_history
 
     def chat(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]], config: Config) -> Dict[str, Any]:
@@ -261,6 +236,8 @@ class GeminiProvider(BaseProvider):
         self.logger.debug(f"Sending request to Gemini with {len(messages)} messages and {len(tools)} tools.")
         gemini_tools = self._format_tools_for_gemini(tools)
         gemini_history = self._format_messages_for_gemini(messages)
+        
+        self.logger.debug(f"GeminiProvider: History for generate_content: {json.dumps(gemini_history, indent=2)}")
         
         # Extract latest user message as the current prompt for generate_content
         # The history should contain previous turns

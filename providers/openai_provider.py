@@ -87,97 +87,171 @@ class OpenAIProvider(BaseProvider):
         formatted_messages = []
         for msg in messages:
             role = msg.get('role')
-            content = msg.get('content')
+            content = msg.get('content') # This content is already processed by context_sanitizer
 
-            # --- Handle Assistant Message with Tool Use ---
-            if role == 'assistant' and isinstance(content, list) and content and content[0].get('type') == 'tool_use':
-                tool_calls = []
-                valid_conversion = True
-                for item in content:
-                    if item.get('type') == 'tool_use':
-                        tool_calls.append({
-                            "id": item.get('id'), # Pass the ID back
-                            "type": "function",
-                            "function": {
-                                "name": item.get('name'),
-                                "arguments": json.dumps(item.get('input', {})) # Arguments must be a JSON string
-                            }
-                        })
-                    else:
-                        self.logger.error(f"Assistant message contains mixed content with tool_use, cannot format as tool_calls: {content}")
-                        valid_conversion = False
-                        break
+            if role == 'assistant':
+                assistant_text_accumulated = []
+                assistant_tool_calls = []
+                has_any_tool_use_defined = False # To track if a tool_use was seen, even if it failed to format
 
-                if tool_calls and valid_conversion:
-                    formatted_messages.append({"role": "assistant", "tool_calls": tool_calls})
-                    self.logger.debug(f"Formatted assistant tool_use to tool_calls: {tool_calls}")
-                elif valid_conversion:
-                     formatted_messages.append({"role": "assistant", "content": ""})
+                if isinstance(content, list):
+                    for item in content:
+                        if not isinstance(item, dict):
+                            self.logger.warning(f"Assistant message content part is not a dict: {item}. Skipping.")
+                            continue
+                        
+                        item_type = item.get('type')
+                        if item_type == 'text':
+                            assistant_text_accumulated.append(item.get('text', ''))
+                        elif item_type == 'tool_use':
+                            has_any_tool_use_defined = True
+                            tool_id = item.get('id')
+                            tool_name = item.get('name')
+                            tool_input_args = item.get('input', {})
+                            
+                            if not tool_id or not tool_name:
+                                self.logger.error(f"Assistant tool_use item missing id or name: {item}. Skipping this tool_call.")
+                                continue
+
+                            tool_arguments_str = ""
+                            if isinstance(tool_input_args, str):
+                                tool_arguments_str = tool_input_args
+                            elif isinstance(tool_input_args, dict):
+                                try:
+                                    tool_arguments_str = json.dumps(tool_input_args)
+                                except TypeError as e:
+                                    self.logger.error(f"Could not serialize tool arguments to JSON for tool '{tool_name}': {tool_input_args}. Error: {e}")
+                                    tool_arguments_str = "{}"
+                            else:
+                                self.logger.warning(f"Tool arguments for tool '{tool_name}' are not a dict or string: {tool_input_args}. Using empty JSON object string.")
+                                tool_arguments_str = "{}"
+
+                            assistant_tool_calls.append({
+                                "id": tool_id,
+                                "type": "function",
+                                "function": {
+                                    "name": tool_name,
+                                    "arguments": tool_arguments_str
+                                }
+                            })
+                        else:
+                            self.logger.warning(f"Unsupported part type '{item_type}' in assistant message content: {item}. It will be ignored.")
+
+                elif isinstance(content, str):
+                    assistant_text_accumulated.append(content)
+                elif content is None and role == 'assistant':
+                    pass
                 else:
-                     formatted_messages.append({"role": "assistant", "content": "[Internal formatting error: unable to convert mixed tool_use message]"})
+                    self.logger.warning(f"Assistant message content is of unexpected type or None: {type(content)}. Content: {content}")
 
-            # --- Handle User Message Containing Tool Result(s) ---
-            # ce3.py sends tool results back as role:user, content: [{type:tool_result, ...}]
-            elif role == 'user' and isinstance(content, list) and content and content[0].get('type') == 'tool_result':
+                openai_assistant_msg = {"role": "assistant"}
+                final_assistant_text_content = " ".join(filter(None, assistant_text_accumulated)).strip()
+
+                if assistant_tool_calls:
+                    openai_assistant_msg["tool_calls"] = assistant_tool_calls
+                    if final_assistant_text_content:
+                        openai_assistant_msg["content"] = final_assistant_text_content
+                    else:
+                        openai_assistant_msg["content"] = None
+                elif final_assistant_text_content:
+                    openai_assistant_msg["content"] = final_assistant_text_content
+                else:
+                    if has_any_tool_use_defined and not assistant_tool_calls:
+                        self.logger.error(f"Assistant message contained tool_use parts that could not be formatted: {content}")
+                        openai_assistant_msg["content"] = "[Internal error: Failed to process tool calls for assistant message.]"
+                        # Append this error message only if it's constructed
+                        formatted_messages.append(openai_assistant_msg) 
+                    elif content is not None and not isinstance(content, list) and not isinstance(content, str):
+                         openai_assistant_msg["content"] = f"[Unparseable assistant content: {str(content)[:100]}]"
+                         formatted_messages.append(openai_assistant_msg)
+                    # elif not (final_assistant_text_content or assistant_tool_calls or (has_any_tool_use_defined and not assistant_tool_calls)):
+                    #     self.logger.debug(f"Skipping empty or fully unhandled assistant message. Original content: {content}")
+                    # The above elif is commented out to ensure that if an error message was set, it gets appended by the next check
+
+                if "tool_calls" in openai_assistant_msg or ("content" in openai_assistant_msg and openai_assistant_msg["content"] is not None):
+                    # Avoid appending if it was already appended due to an error message construction above
+                    if not (has_any_tool_use_defined and not assistant_tool_calls and "content" in openai_assistant_msg and openai_assistant_msg["content"].startswith("[Internal error")) and \
+                       not (content is not None and not isinstance(content, list) and not isinstance(content, str) and "content" in openai_assistant_msg and openai_assistant_msg["content"].startswith("[Unparseable assistant content")):
+                        if openai_assistant_msg not in formatted_messages: # Ensure it wasn't added if an error message was already set and appended
+                            formatted_messages.append(openai_assistant_msg)
+                    
+                    if assistant_tool_calls:
+                         self.logger.debug(f"Formatted assistant message with tool_calls: {json.dumps(openai_assistant_msg, indent=2)}")
+                    elif final_assistant_text_content:
+                         self.logger.debug(f"Formatted assistant message with text content: {json.dumps(openai_assistant_msg, indent=2)}")
+
+            elif role == 'user' and isinstance(content, list) and content and \
+                 isinstance(content[0], dict) and content[0].get('type') == 'tool_result':
                 self.logger.debug(f"Detected user message containing tool results: {content}")
-                # Convert each tool result into a separate OpenAI tool message
                 for item in content:
-                    if item.get('type') == 'tool_result':
+                    if isinstance(item, dict) and item.get('type') == 'tool_result':
                         tool_use_id = item.get('tool_use_id')
                         tool_output = item.get('content')
+
                         if not tool_use_id:
-                            self.logger.error(f"Tool result item missing 'tool_use_id': {item}")
-                            continue # Skip invalid tool result message
+                            self.logger.error(f"Tool result item missing 'tool_use_id': {item}. Skipping this result.")
+                            continue
+                        
+                        tool_output_str = str(tool_output) if tool_output is not None else ""
 
                         formatted_messages.append({
                             "role": "tool",
                             "tool_call_id": tool_use_id,
-                            "content": str(tool_output) # Content must be a string
+                            "content": tool_output_str
                         })
                         self.logger.debug(f"Formatted tool result for tool_call_id: {tool_use_id}")
                     else:
-                         self.logger.warning(f"Found unexpected item type within user tool result message: {item.get('type')}")
+                         self.logger.warning(f"Found unexpected item within user-role tool result message list: {item}")
 
-            # --- Handle Regular User/Assistant Messages (excluding tool use/result handling above) ---
-            elif role in ['user', 'assistant']:
+            elif role == 'user':
                  if isinstance(content, str):
-                     formatted_messages.append({"role": role, "content": content})
+                     formatted_messages.append({"role": "user", "content": content})
                  elif isinstance(content, list):
-                     # This branch should now mainly handle multimodal user messages
                      openai_parts = []
                      for item in content:
-                         if item.get('type') == 'text':
-                             openai_parts.append({'type': 'text', 'text': item.get('text', '')})
-                         elif item.get('type') == 'image' and item.get('source', {}).get('type') == 'base64':
-                             source = item['source']
-                             media_type = source.get('media_type', 'image/jpeg')
-                             base64_data = source.get('data', '')
-                             if base64_data:
-                                 openai_parts.append({
-                                     'type': 'image_url',
-                                     'image_url': {'url': f'data:{media_type};base64,{base64_data}'}
-                                 })
-                             else:
-                                 self.logger.warning("Image message part missing base64 data.")
-                         else:
-                             # Avoid logging 'tool_result' here as it's handled above
-                             if item.get('type') != 'tool_result': 
-                                 self.logger.warning(f"Unsupported item type in {role} message content list: {item.get('type')}")
-                     if openai_parts:
-                          formatted_messages.append({"role": role, "content": openai_parts})
-                     # Decide how to handle user messages that *only* contained unsupported types (or were empty lists)
-                     # else: maybe append a placeholder or skip?
-                     #     formatted_messages.append({"role": role, "content": "[Unsupported list content]"})
-                 else:
-                    self.logger.warning(f"Unexpected content type in {role} message: {type(content)}. Converting to string.")
-                    formatted_messages.append({"role": role, "content": str(content)})
-            
-            # --- Skip System/Other roles ---
-            elif role == 'system':
-                 self.logger.debug("Skipping system message during history formatting.")
-            else:
-                 self.logger.warning(f"Skipping message with unhandled role: {role}")
+                         if not isinstance(item, dict):
+                             self.logger.warning(f"User message content part is not a dict: {item}. Converting to text.")
+                             openai_parts.append({'type': 'text', 'text': str(item)})
+                             continue
 
+                         item_type = item.get('type')
+                         if item_type == 'text':
+                             openai_parts.append({'type': 'text', 'text': item.get('text', '')})
+                         elif item_type == 'image_url':
+                             if isinstance(item.get("image_url"), dict) and "url" in item["image_url"]:
+                                 openai_parts.append(item)
+                             else:
+                                 self.logger.warning(f"Malformed image_url part in user message: {item}. Skipping.")
+                         else:
+                             self.logger.warning(f"Unsupported item type '{item_type}' in user message content list: {item}. Converting to text representation.")
+                             openai_parts.append({'type': 'text', 'text': f"[Unsupported content part: {str(item)[:100]}]"})
+                     
+                     if openai_parts:
+                          formatted_messages.append({"role": "user", "content": openai_parts})
+                     else:
+                          self.logger.warning(f"User message content was a list but resulted in no processable OpenAI parts: {content}")
+            
+            elif role == 'system':
+                 self.logger.debug(f"System message encountered in _format_messages_for_openai; should be handled by caller. Content: {str(content)[:100]}")
+                 pass
+
+            elif role == 'tool':
+                tool_call_id = msg.get("tool_call_id")
+                if not tool_call_id:
+                    self.logger.error(f"Message with role 'tool' is missing 'tool_call_id': {msg}. Skipping.")
+                    continue
+                
+                tool_content_str = str(msg.get("content", ""))
+
+                formatted_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": tool_content_str
+                })
+                self.logger.debug(f"Passed through existing 'tool' role message for tool_call_id: {tool_call_id}")
+            else:
+                 self.logger.warning(f"Skipping message with unhandled role '{role}' in _format_messages_for_openai")
+        
         return formatted_messages
 
     def chat(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]], config: Config) -> Dict[str, Any]:
@@ -207,9 +281,10 @@ class OpenAIProvider(BaseProvider):
         else:
              user_messages = messages # No system prompt found
 
-        self.logger.debug(f"Sending request to OpenAI with {len(user_messages)} history messages and {len(tools)} tools.")
+        self.logger.debug(f"OpenAIProvider: Messages to be formatted by _format_messages_for_openai: {json.dumps(user_messages, indent=2)}")
         openai_tools = self._format_tools_for_openai(tools)
         formatted_history = self._format_messages_for_openai(user_messages)
+        self.logger.debug(f"OpenAIProvider: Messages after formatting by _format_messages_for_openai (sent to API): {json.dumps(formatted_history, indent=2)}")
 
         # Determine the model to use (can be made dynamic later)
         # Defaulting to gpt-4o-mini for cost/performance balance

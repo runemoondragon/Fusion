@@ -30,8 +30,8 @@ from prompts.system_prompts import SystemPrompts
 
 # Configure logging to only show ERROR level and above
 logging.basicConfig(
-    level=logging.ERROR,
-    format='%(levelname)s: %(message)s'
+    level=logging.DEBUG,
+    format='%(levelname)s: %(filename)s:%(lineno)d - %(message)s'
 )
 
 # --- ADDED: Mode Prompts Definition ---
