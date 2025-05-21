@@ -149,54 +149,89 @@ def sanitize_history(history: List[Dict], provider: str) -> List[Dict]:
     return final_sanitized_history
 
 def _sanitize_for_gemini(content: Any) -> Any:
-    """Remove or reformat structures that Gemini can't parse well in history from other models."""
-    # Gemini expects content to be a list of "parts" (each part a dict, typically with 'text' or 'inline_data').
-    # It's less tolerant of 'type' fields like 'tool_use' or 'tool_result' directly in history messages
-    # that are not responses from Gemini itself (FunctionCall/FunctionResponse).
+    """Convert content to a list of Gemini 'parts', translating tool_use/tool_result appropriately."""
     
-    if isinstance(content, str):
-        return [{"text": content}] # Gemini wants parts to be a list of dicts
-
     gemini_parts = []
-    if isinstance(content, list): # Content is already a list of parts (hopefully dicts)
-        for part in content:
-            if isinstance(part, dict):
-                part_type = part.get("type")
-                if part_type == "text":
-                    gemini_parts.append({"text": part.get("text", "")})
-                elif part_type == "image" and part.get("source", {}).get("type") == "base64":
-                    source = part["source"]
-                    # Gemini needs actual image bytes for inline_data, not just base64 string directly in "data" field
-                    # This requires conversion. For sanitization, we might just represent it as text or omit.
-                    # For now, let's represent as text. Actual image upload to Gemini is handled by provider.
-                    gemini_parts.append({"text": f"[Image content: {source.get('media_type', 'image/jpeg')}, data omitted]"})
-                elif part_type == "tool_use": # From Claude/OpenAI history
-                    gemini_parts.append({"text": f"[Assistant tool call to '{part.get('name')}' with input '{part.get('input')}' omitted for Gemini history compatibility.]"})
-                elif part_type == "tool_result": # From Claude/OpenAI history
-                    gemini_parts.append({"text": f"[Tool result for '{part.get('tool_use_id')}' (content: '{str(part.get('content'))[:50]}...') omitted for Gemini history compatibility.]"})
-                else: # Unknown dict part
-                    gemini_parts.append({"text": str(part)}) # Convert to text
-            elif isinstance(part, str):
-                gemini_parts.append({"text": part})
-    elif isinstance(content, dict): # Content is a single dict
-        # Similar logic as above, try to convert based on 'type' or just stringify
-        part_type = content.get("type")
-        if part_type == "text":
-            gemini_parts.append({"text": content.get("text", "")})
-        elif part_type == "image": # ... (similar image handling as above) ...
-            # This block was incomplete in the prompt, assuming placeholder for now or simple pass
-            # For a real implementation, image handling logic for Gemini history would go here.
-            # If just redacting, it could be: 
-            # gemini_parts.append({"text": f"[Image content omitted for Gemini history.]"})
-            pass # Placeholder, as the original logic was also 'pass'
-        elif part_type == "tool_use":
-             gemini_parts.append({"text": f"[Assistant tool call '{content.get('name')}' omitted.]"})
-        elif part_type == "tool_result":
-             gemini_parts.append({"text": f"[Tool result '{str(content.get('content'))[:50]}' omitted.]"})
-        else:
-            gemini_parts.append({"text": str(content)})
+
+    if not isinstance(content, list): # If content is not a list (e.g. str or single dict), wrap it in a list to process uniformly
+        content_list = [content]
+    else:
+        content_list = content
+
+    for item in content_list:
+        if isinstance(item, dict):
+            part_type = item.get("type")
+            if part_type == "text":
+                gemini_parts.append({"text": item.get("text", "")})
+            elif part_type == "image" and item.get("source", {}).get("type") == "base64":
+                source = item["source"]
+                # For sanitization, represent as text. Actual image upload to Gemini is by provider.
+                gemini_parts.append({"text": f"[Image content: {source.get('media_type', 'image/jpeg')}, data omitted for history sanitization]"})
             
-    return gemini_parts if gemini_parts else [{"text": "[Unsupported or empty content]"}]
+            elif part_type == "tool_use":
+                tool_name = item.get("name")
+                tool_input_args = item.get("input", {})
+                if tool_name:
+                    # Convert input args to a simple dict if it's not already (Gemini expects a plain dict for args)
+                    # The _deep_sanitize earlier should have handled Pydantic objects, but ensure it's basic.
+                    processed_args = {k: v for k, v in tool_input_args.items()} if isinstance(tool_input_args, dict) else {}
+                    gemini_parts.append({
+                        "function_call": {
+                            "name": tool_name,
+                            "args": processed_args
+                        }
+                    })
+                else:
+                    gemini_parts.append({"text": "[Invalid 'tool_use' part encountered: missing name]"})
+            
+            elif part_type == "tool_result":
+                # For Gemini, tool_result needs to be a "function_response".
+                # The 'name' in function_response should match the 'name' from the corresponding 'function_call'.
+                # The 'tool_use_id' from the shared history format often serves as the 'name' for matching.
+                # Some LLMs use the tool_name directly as this identifier in their request/response.
+                # We need to get the 'name' of the tool this result is for.
+                # Assuming 'tool_use_id' from input part IS the function name for Gemini's matching.
+                # Or, if 'name' or 'tool_name' field is present in the tool_result part, use that.
+                
+                # Heuristic: The 'id' of a tool_use block often becomes the 'tool_use_id' of a tool_result.
+                # Gemini's FunctionResponse expects 'name' to be the function name.
+                # Let's assume 'tool_use_id' in the incoming 'tool_result' part is the function's name.
+                # If 'name' or 'tool_name' is explicitly in the part, prioritize that.
+                function_name = item.get("name", item.get("tool_name", item.get("tool_use_id")))
+                
+                result_content = item.get("content", "") # This should be the string output from the tool (e.g. error message)
+
+                if function_name:
+                    gemini_parts.append({
+                        "function_response": {
+                            "name": function_name,
+                            "response": {
+                                # Gemini expects the 'response' to contain the actual content from the tool.
+                                # This content should be serializable (e.g., string, dict).
+                                # If 'result_content' is a simple string (like an error message), it's fine.
+                                # If it's JSON string, it might need to be parsed if Gemini expects a dict,
+                                # or kept as string if Gemini expects a stringified JSON.
+                                # For now, let's assume 'content' from tool result is the direct data.
+                                # The `_execute_tool` in `ce3.py` returns a string.
+                                "content": result_content
+                            }
+                        }
+                    })
+                else:
+                    gemini_parts.append({"text": "[Invalid 'tool_result' part encountered: missing function name/id]"})
+            
+            else: # Unknown dict part, or dict without a recognized 'type'
+                # Convert to text to avoid Gemini API errors with unexpected structures
+                gemini_parts.append({"text": f"[Unsupported structured part converted to text: {str(item)[:100]}]"})
+        
+        elif isinstance(item, str): # If item in content_list is just a string
+            gemini_parts.append({"text": item})
+        
+        else: # Other non-dict, non-string items in content_list
+             gemini_parts.append({"text": f"[Unsupported content type '{type(item)}' converted to text: {str(item)[:100]}]"})
+
+    # Ensure we always return some parts, even if it's just a placeholder for empty/fully unsupported content
+    return gemini_parts if gemini_parts else [{"text": "[Content was empty or fully unsupported after sanitization for Gemini]"}]
 
 def _sanitize_for_openai(content: Any) -> Any:
     """

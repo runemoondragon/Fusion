@@ -10,6 +10,7 @@ import logging # Add logging
 # Import the NeuroSwitch classifier function and default provider
 from neuroswitch_classifier import get_neuroswitch_provider, DEFAULT_PROVIDER
 import uuid # For generating unique IDs
+import json # Added for json.dumps in reset route
 
 app = Flask(__name__, static_folder='static')
 app.config['UPLOAD_FOLDER'] = 'uploads'
@@ -74,14 +75,12 @@ def get_request_identifier_and_type() -> tuple[str, str]:
     if session_id_header:
         return session_id_header, "api"
     elif auth_header and auth_header.startswith('Bearer '):
-        return auth_header.split(' ')[1], "api" # Use the token as identifier
+        # Use the token itself as the identifier for API calls
+        return auth_header.split('Bearer ')[1].strip(), "api"
     else:
-        # Fallback to Flask session for direct browser interaction (e.g., testing UI)
+        # Fallback to Flask session for direct browser interaction
         if '_id' not in session: # Flask's session cookie usually manages its own ID
-            session['_id'] = str(uuid.uuid4()) # Ensure session is initiated
-        # Using session.sid if available and configured for server-side sessions,
-        # otherwise, Flask's session object itself is the context.
-        # For simplicity here, we'll generate a stable ID if not present.
+            session['_id'] = str(uuid.uuid4()) # Ensure Flask session is initiated
         if 'neuroswitch_flask_session_id' not in session:
             session['neuroswitch_flask_session_id'] = str(uuid.uuid4())
         return session['neuroswitch_flask_session_id'], "flask_session"
@@ -121,13 +120,10 @@ def save_session_data(identifier: str, session_type: str, history: list, tokens:
 
 @app.route('/')
 def home():
-    req_id, req_type = get_request_identifier_and_type() # Ensure session is created if flask_session
-    # Pass the combined list of providers to the template
-    # available_providers = list(ProviderFactory._providers.keys()) # Old way
-    available_providers = ALL_PROVIDERS_WITH_NEUROSWITCH # New list including NeuroSwitch
-    # Default to NeuroSwitch if nothing is selected? Or keep claude? Let's keep claude for now.
-    selected_provider = session.get('provider', 'claude') 
-    logging.info(f"Home route accessed by ID: {req_id} (Type: {req_type})")
+    req_id, req_type = get_request_identifier_and_type()
+    available_providers = ALL_PROVIDERS_WITH_NEUROSWITCH
+    selected_provider = session.get('provider', DEFAULT_PROVIDER) # Use DEFAULT_PROVIDER
+    logging.info(f"Home route accessed by ID: {req_id} (Type: {req_type})") # Keep this as INFO
     return render_template('index.html', 
                            providers=available_providers, 
                            selected_provider=selected_provider)
@@ -150,9 +146,53 @@ def set_provider():
 @app.route('/chat', methods=['POST'])
 def chat():
     req_id, req_type = get_request_identifier_and_type()
+    
+    # !!!!! ----- ADDED CRITICAL LOGGING ----- !!!!!
+    logging.critical(f"----- NEW /chat REQUEST -----")
+    logging.critical(f"Incoming req_id: {req_id}, req_type: {req_type}")
+    # Log all headers for API requests to see exactly what's coming in
+    if req_type == "api":
+        headers_str = json.dumps(dict(request.headers), indent=2)
+        logging.critical(f"Incoming API Request Headers: {headers_str}")
+    
+    # Log the state of api_client_session_store BEFORE getting session data
+    if req_type == "api":
+        # Make a copy of keys to avoid issues if dict changes during iteration (though unlikely here)
+        current_keys = list(api_client_session_store.keys())
+        logging.critical(f"Current api_client_session_store keys: {current_keys}")
+        if req_id in api_client_session_store:
+            # Log only a summary of history to avoid huge log lines
+            history_summary = []
+            if api_client_session_store[req_id]['conversation_history']:
+                first_msg_role = api_client_session_store[req_id]['conversation_history'][0].get('role', 'unknown')
+                first_msg_content_preview = str(api_client_session_store[req_id]['conversation_history'][0].get('content', ''))[:50]
+                history_summary.append(f"First msg: role={first_msg_role}, content='{first_msg_content_preview}...'")
+                if len(api_client_session_store[req_id]['conversation_history']) > 1:
+                    history_summary.append(f"...and {len(api_client_session_store[req_id]['conversation_history']) - 1} more message(s).")
+            else:
+                history_summary.append("History is empty.")
+            logging.critical(f"Data for req_id '{req_id}' IN api_client_session_store BEFORE get_session_data: History summary: {', '.join(history_summary)}. Tokens: {api_client_session_store[req_id]['total_tokens_used']}")
+        else:
+            logging.critical(f"req_id '{req_id}' NOT YET IN api_client_session_store.")
+    # !!!!! ----- END OF ADDED CRITICAL LOGGING ----- !!!!!
+
     session_data = get_session_data(req_id, req_type)
     current_conversation_history = session_data['conversation_history']
     current_total_tokens_used = session_data['total_tokens_used']
+    
+    # !!!!! ----- ADDED CRITICAL LOGGING ----- !!!!!
+    # Log summary of history AFTER get_session_data
+    history_summary_after = []
+    if current_conversation_history:
+        first_msg_role_after = current_conversation_history[0].get('role', 'unknown')
+        first_msg_content_preview_after = str(current_conversation_history[0].get('content', ''))[:50]
+        history_summary_after.append(f"First msg: role={first_msg_role_after}, content='{first_msg_content_preview_after}...'")
+        if len(current_conversation_history) > 1:
+            history_summary_after.append(f"...and {len(current_conversation_history) - 1} more message(s).")
+    else:
+        history_summary_after.append("History is empty.")
+    logging.critical(f"Data for req_id '{req_id}' LOADED BY get_session_data: History summary: {', '.join(history_summary_after)}. Tokens: {current_total_tokens_used}")
+    # !!!!! ----- END OF ADDED CRITICAL LOGGING ----- !!!!!
 
     data = request.json
     message = data.get('message', '')
@@ -392,15 +432,28 @@ def upload_file():
 def reset():
     req_id, req_type = get_request_identifier_and_type()
     
+    # !!!!! ----- ADDED CRITICAL LOGGING ----- !!!!!
+    logging.critical(f"----- NEW /reset REQUEST -----")
+    logging.critical(f"Incoming req_id for reset: {req_id}, req_type: {req_type}")
+    if req_type == "api":
+        # Make a copy of keys to avoid issues if dict changes during iteration
+        current_keys_before_reset = list(api_client_session_store.keys())
+        logging.critical(f"Resetting API client session. BEFORE reset, keys in api_client_session_store: {current_keys_before_reset}")
+        if req_id in api_client_session_store:
+            logging.critical(f"Data for req_id '{req_id}' being reset. Old history length: {len(api_client_session_store[req_id]['conversation_history'])}, Old tokens: {api_client_session_store[req_id]['total_tokens_used']}")
+    # !!!!! ----- END OF ADDED CRITICAL LOGGING ----- !!!!!
+    
     if req_type == "api":
         if req_id in api_client_session_store:
             api_client_session_store[req_id]['conversation_history'] = []
             api_client_session_store[req_id]['total_tokens_used'] = 0
-            logging.info(f"Conversation reset for API client ID: {req_id}")
+            logging.critical(f"Conversation RESET for API client ID: {req_id}. Store now contains history length: {len(api_client_session_store[req_id]['conversation_history'])}, tokens: {api_client_session_store[req_id]['total_tokens_used']}")
             status_message = f"Conversation reset for API client ID: {req_id}"
         else:
-            logging.info(f"No active session to reset for API client ID: {req_id}")
-            status_message = f"No active session to reset for API client ID: {req_id}"
+            # This case means the ID wasn't in the store, so initialize it as empty.
+            api_client_session_store[req_id] = {'conversation_history': [], 'total_tokens_used': 0}
+            logging.critical(f"No active session found for API client ID '{req_id}' to reset, but INITIALIZED it as empty.")
+            status_message = f"No active session found for API client ID '{req_id}' to reset; initialized as new empty session."
     else: # flask_session
         session['conversation_history'] = []
         session['total_tokens_used'] = 0
