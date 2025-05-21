@@ -36,29 +36,25 @@ def _recursively_convert_mappings_to_dict(item: Any) -> Any:
 class GeminiProvider(BaseProvider):
     """Provider implementation for Google's Gemini API."""
 
-    def __init__(self):
+    def __init__(self, api_key: str = None):
         self.logger = logging.getLogger(__name__)
         self.model = None
-        if not Config.GEMINI_API_KEY:
-            self.logger.warning("GEMINI_API_KEY not found in environment variables. Gemini provider will not work.")
-        else:
+
+        final_api_key_to_use = api_key # This is the key selected by app.py
+
+        if final_api_key_to_use:
+            # app.py has already logged the original source (header or .env)
             try:
-                genai.configure(api_key=Config.GEMINI_API_KEY)
-                # Choose a model - let's use a recent one capable of function calling
+                genai.configure(api_key=final_api_key_to_use)
                 model_name = getattr(Config, 'GEMINI_MODEL', 'gemini-1.5-flash-latest') 
-                # TODO: Consider adding safety settings configuration
-                self.model = genai.GenerativeModel(
-                    model_name,
-                    # Example Safety Settings (adjust as needed)
-                    # safety_settings={
-                    #     HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_LOW_AND_ABOVE,
-                    #     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_LOW_AND_ABOVE,
-                    # }
-                )
-                self.logger.info(f"Gemini client configured for model: {model_name}")
+                self.model = genai.GenerativeModel(model_name)
+                self.logger.info(f"Gemini client configured with the API key selected by application logic for model: {model_name}")
             except Exception as e:
-                self.logger.exception("Failed to configure Gemini client")
-                # Keep self.model as None
+                self.logger.exception(f"Failed to configure Gemini client with the API key selected by application logic: {e}")
+                self.model = None # Ensure model is None if configuration fails
+        else:
+            self.logger.warning(f"No API key was determined by application logic for Gemini. Gemini provider will not work.")
+            # self.model remains None
 
     @property
     def name(self) -> str:

@@ -14,12 +14,13 @@ class ProviderFactory:
     }
 
     @staticmethod
-    def create_provider(provider_name: str) -> BaseProvider:
+    def create_provider(provider_name: str, api_key: str = None) -> BaseProvider:
         """
         Create and return an instance of the specified provider.
 
         Args:
             provider_name: The name of the provider (e.g., 'claude').
+            api_key: Optional API key to use for this provider instance.
 
         Returns:
             An instance of the corresponding BaseProvider subclass.
@@ -31,5 +32,5 @@ class ProviderFactory:
         if not provider_class:
             raise ValueError(f"Unknown provider: {provider_name}. Available: {list(ProviderFactory._providers.keys())}")
         
-        # Instantiate and return the provider
-        return provider_class() 
+        # Instantiate and return the provider, passing the api_key
+        return provider_class(api_key=api_key) 

@@ -17,17 +17,25 @@ from config import Config
 class OpenAIProvider(BaseProvider):
     """Provider implementation for OpenAI's ChatGPT API."""
 
-    def __init__(self):
+    def __init__(self, api_key: str = None):
         self.logger = logging.getLogger(__name__)
-        if not Config.OPENAI_API_KEY:
-            self.logger.warning("OPENAI_API_KEY not found in environment variables. OpenAI provider will not work.")
-            # Optionally raise an error to prevent usage without a key
-            # raise ValueError("OPENAI_API_KEY not found in environment variables")
-            self.client = None # Indicate client is not initialized
+        self.client = None 
+
+        final_api_key_to_use = api_key # This is the key selected by app.py
+
+        if final_api_key_to_use:
+            # app.py has already logged the original source (header or .env)
+            try:
+                self.client = openai.OpenAI(api_key=final_api_key_to_use)
+                # Simplified log: app.py now logs the source more accurately.
+                self.logger.info(f"OpenAI client configured with the API key selected by application logic.")
+            except Exception as e:
+                self.logger.exception(f"Failed to initialize OpenAI client with the API key selected by application logic: {e}")
+                self.client = None # Ensure client is None if initialization fails
         else:
-            # Initialize the OpenAI client
-            self.client = openai.OpenAI(api_key=Config.OPENAI_API_KEY)
-            self.logger.info("OpenAI client initialized.")
+            # This case means app.py found NO key (neither header nor .env for OpenAI)
+            self.logger.warning(f"No API key was determined by application logic for OpenAI. OpenAI provider will not work.")
+            # self.client remains None
 
     @property
     def name(self) -> str:

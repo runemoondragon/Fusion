@@ -70,6 +70,7 @@ class Assistant:
         self.console = Console() # For server-side logging/tool display
         self.thinking_enabled = getattr(Config, 'ENABLE_THINKING', False)
         self.tools = self._load_tools()
+        self.system_prompts = SystemPrompts()
 
     def _execute_uv_install(self, package_name: str) -> bool:
         """
@@ -383,11 +384,14 @@ class Assistant:
         usage_info = f"[bold yellow]Token Usage:[/bold yellow] {input_str}, {output_str}. {total_str} / {max_tokens_str}. {runtime_str}"
         self.console.print(Markdown(usage_info))
 
-    def chat(self, user_input: Any, provider: BaseProvider,
-             conversation_history: List[Dict[str, Any]],
-             total_tokens_used: int, # Current total for this session, passed in
-             mode: str | None = None,
-             request_id: str | None = None) -> Dict[str, Any]: # Optional request_id for logging
+    def chat(self, 
+             user_input: any, 
+             provider: BaseProvider, 
+             conversation_history: list, 
+             total_tokens_used: int, 
+             mode: str, 
+             request_id: str # Added for consistent logging
+            ) -> Dict[str, Any]:
         """
         Processes a chat message, interacts with the provider, and handles tool use.
         This method is STATELESS regarding history and tokens.

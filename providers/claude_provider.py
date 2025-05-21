@@ -9,11 +9,27 @@ from config import Config
 class ClaudeProvider(BaseProvider):
     """Provider implementation for Anthropic's Claude API."""
 
-    def __init__(self):
-        if not Config.ANTHROPIC_API_KEY:
-            raise ValueError("ANTHROPIC_API_KEY not found in environment variables")
-        self.client = anthropic.Anthropic(api_key=Config.ANTHROPIC_API_KEY)
+    def __init__(self, api_key: str = None):
         self.logger = logging.getLogger(__name__)
+        self.client = None
+
+        final_api_key_to_use = api_key # This is the key selected by app.py
+
+        if final_api_key_to_use:
+            # app.py has already logged the original source (header or .env)
+            try:
+                self.client = anthropic.Anthropic(api_key=final_api_key_to_use)
+                self.logger.info(f"Claude client configured with the API key selected by application logic.")
+            except Exception as e:
+                self.logger.exception(f"Failed to initialize Claude client with the API key selected by application logic: {e}")
+                self.client = None
+                # Optionally re-raise, as Claude provider was stricter before
+                # raise ValueError(f"Failed to initialize Claude client with selected key: {e}")
+        else:
+            self.logger.warning(f"No API key was determined by application logic for Claude. Claude provider will not work.")
+            # self.client remains None
+            # Optionally re-raise, as Claude provider was stricter before
+            # raise ValueError(f"No API key determined for Claude by application logic.")
 
     @property
     def name(self) -> str:

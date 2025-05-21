@@ -147,6 +147,12 @@ def set_provider():
 def chat():
     req_id, req_type = get_request_identifier_and_type()
     
+    # NEW: Extract provider-specific API keys from headers
+    openai_user_key = request.headers.get("X-OpenAI-API-Key")
+    claude_user_key = request.headers.get("X-Claude-API-Key")
+    gemini_user_key = request.headers.get("X-Gemini-API-Key")
+    # END NEW
+
     # !!!!! ----- ADDED CRITICAL LOGGING ----- !!!!!
     logging.critical(f"----- NEW /chat REQUEST -----")
     logging.critical(f"Incoming req_id: {req_id}, req_type: {req_type}")
@@ -194,63 +200,59 @@ def chat():
     logging.critical(f"Data for req_id '{req_id}' LOADED BY get_session_data: History summary: {', '.join(history_summary_after)}. Tokens: {current_total_tokens_used}")
     # !!!!! ----- END OF ADDED CRITICAL LOGGING ----- !!!!!
 
+    # A. Extract external API key from X-Provider-API-Key header
+    # No longer needed as we use specific keys above.
+
     data = request.json
     message = data.get('message', '')
     image_data = data.get('image')
     mode = data.get('mode')
     
     # --- Refined Provider Selection Logic for API and Flask UI ---
-    provider_to_use_for_routing_or_direct_call = None # This will be determined first
-    is_direct_provider_request = False # Flag to bypass NeuroSwitch classifier
+    is_direct_provider_request = False 
+    provider_to_use_for_routing_or_direct_call = None # Will hold the name for direct instantiation or NEUROSWITCH_PROVIDER_NAME
 
     if req_type == "api":
-        # For API calls, check 'provider' then 'model' fields from payload
-        provider_from_payload = data.get('provider')
-        model_from_payload = data.get('model') # 'model' is often used for specific LLM names
+        # --- ADDED: Log raw request body ---
+        try:
+            raw_request_body = request.data.decode('utf-8')
+            logging.debug(f"API Chat ID: {req_id}. Raw request body: {raw_request_body}")
+        except Exception as e:
+            logging.error(f"API Chat ID: {req_id}. Error decoding raw request body: {e}")
+        # --- END ADDED ---
+
+        # --- ADDED: Log parsed JSON payload (data) ---
+        logging.debug(f"API Chat ID: {req_id}. Parsed JSON payload (data): {data}")
+        # --- END ADDED ---
         
-        # Normalize inputs
-        normalized_provider_payload = str(provider_from_payload).lower() if provider_from_payload else None
+        model_from_payload = data.get('requested_provider')
         normalized_model_payload = str(model_from_payload).lower() if model_from_payload else None
 
-        logging.info(f"API Chat ID: {req_id}. Payload provider: '{provider_from_payload}', model: '{model_from_payload}'")
+        logging.info(f"API Chat ID: {req_id}. Provider determination based on JSON payload 'requested_provider': '{model_from_payload}'")
 
-        # Priority 1: 'provider' field in payload
-        if normalized_provider_payload:
-            if normalized_provider_payload in DIRECT_PROVIDER_KEYS:
-                provider_to_use_for_routing_or_direct_call = normalized_provider_payload
-                is_direct_provider_request = True
-            elif DIRECT_PROVIDER_ALIASES.get(normalized_provider_payload) in DIRECT_PROVIDER_KEYS:
-                provider_to_use_for_routing_or_direct_call = DIRECT_PROVIDER_ALIASES[normalized_provider_payload]
-                is_direct_provider_request = True
-            elif normalized_provider_payload in NEUROSWITCH_ROUTER_ALIASES:
-                provider_to_use_for_routing_or_direct_call = NEUROSWITCH_PROVIDER_NAME
-                is_direct_provider_request = False # Explicitly use router
-            # else: unrecognized provider string, will fall through to model or default
-
-        # Priority 2: 'model' field in payload (if provider field didn't specify a direct provider)
-        if not is_direct_provider_request and normalized_model_payload:
-            if normalized_model_payload in DIRECT_PROVIDER_KEYS: # e.g. model: "openai"
+        if normalized_model_payload:
+            if normalized_model_payload in DIRECT_PROVIDER_KEYS: # e.g., model: "openai"
                 provider_to_use_for_routing_or_direct_call = normalized_model_payload
-                is_direct_provider_request = True
+                is_direct_provider_request = True 
             elif DIRECT_PROVIDER_ALIASES.get(normalized_model_payload) in DIRECT_PROVIDER_KEYS: # e.g. model: "gpt-4o"
                 provider_to_use_for_routing_or_direct_call = DIRECT_PROVIDER_ALIASES[normalized_model_payload]
                 is_direct_provider_request = True
-            elif normalized_model_payload in NEUROSWITCH_ROUTER_ALIASES: # e.g. model: "neuroswitch"
+                logging.info(f"API Chat ID: {req_id}. 'requested_provider' field '{model_from_payload}' mapped to direct provider '{provider_to_use_for_routing_or_direct_call}' via alias.")
+            elif normalized_model_payload in NEUROSWITCH_ROUTER_ALIASES: # e.g., model: "neuroswitch"
                 provider_to_use_for_routing_or_direct_call = NEUROSWITCH_PROVIDER_NAME
-                is_direct_provider_request = False # Explicitly use router
-            # else: unrecognized model string
+                # is_direct_provider_request remains False, so NeuroSwitch will run if this is the final decision
+            else: # Unrecognized 'model' value
+                logging.warning(f"API Chat ID: {req_id}. 'requested_provider' field '{model_from_payload}' not recognized. Defaulting to NeuroSwitch router.")
+                provider_to_use_for_routing_or_direct_call = NEUROSWITCH_PROVIDER_NAME
+                # is_direct_provider_request remains False
+        else: # 'model' field is missing
+            logging.warning(f"API Chat ID: {req_id}. 'requested_provider' field missing in JSON payload. Defaulting to NeuroSwitch router.")
+            provider_to_use_for_routing_or_direct_call = NEUROSWITCH_PROVIDER_NAME
+            # is_direct_provider_request remains False
 
-        # Default for API if nothing specific was matched to a direct provider or router
-        if provider_to_use_for_routing_or_direct_call is None:
-            provider_to_use_for_routing_or_direct_call = NEUROSWITCH_PROVIDER_NAME # Default to NeuroSwitch routing
-            is_direct_provider_request = False
-            logging.info(f"API Chat ID: {req_id}. No direct provider match from payload, defaulting to NeuroSwitch router.")
-
-    else: # req_type == "flask_session" (Internal UI / Direct Browser)
-        # For Flask sessions, use the provider set in the session (e.g., by the UI dropdown)
-        provider_from_session = session.get('provider', DEFAULT_PROVIDER) # DEFAULT_PROVIDER could be "NeuroSwitch" or a direct one
+    else: # req_type == "flask_session"
+        provider_from_session = session.get('provider', DEFAULT_PROVIDER)
         normalized_session_provider = provider_from_session.lower()
-        
         logging.info(f"Flask Session Chat ID: {req_id}. Provider from session: '{provider_from_session}'")
 
         if normalized_session_provider in DIRECT_PROVIDER_KEYS:
@@ -259,21 +261,20 @@ def chat():
         elif DIRECT_PROVIDER_ALIASES.get(normalized_session_provider) in DIRECT_PROVIDER_KEYS:
             provider_to_use_for_routing_or_direct_call = DIRECT_PROVIDER_ALIASES[normalized_session_provider]
             is_direct_provider_request = True
-        elif normalized_session_provider in NEUROSWITCH_ROUTER_ALIASES:
+        elif normalized_session_provider in NEUROSWITCH_ROUTER_ALIASES: 
             provider_to_use_for_routing_or_direct_call = NEUROSWITCH_PROVIDER_NAME
-            is_direct_provider_request = False
-        else: # Unrecognized or default from session might imply NeuroSwitch routing
+            # is_direct_provider_request remains False
+        else: 
+            logging.warning(f"Flask Session Chat ID: {req_id}. Provider '{provider_from_session}' from session not recognized. Defaulting to NeuroSwitch router.")
             provider_to_use_for_routing_or_direct_call = NEUROSWITCH_PROVIDER_NAME
-            is_direct_provider_request = False
-            logging.warning(f"Flask Session Chat ID: {req_id}. Provider '{provider_from_session}' from session not recognized as direct, defaulting to NeuroSwitch router.")
+            # is_direct_provider_request remains False
+    
+    logging.info(f"Chat ID: {req_id}. Initial Provider Decision: '{provider_to_use_for_routing_or_direct_call}', Is Direct Request Flag: {is_direct_provider_request}")
 
-    logging.info(f"Chat ID: {req_id}. Determined Provider for Routing/Direct Call: '{provider_to_use_for_routing_or_direct_call}', Is Direct Request: {is_direct_provider_request}")
-    # --- End Refined Provider Selection Logic ---
-
-    actual_provider_name_to_instantiate = provider_to_use_for_routing_or_direct_call # Initial value before NeuroSwitch classifier potentially changes it
-    neuroswitch_active = False
-    fallback_reason = None
-    text_input_for_classification = ""
+    # --- NeuroSwitch Logic ---
+    actual_provider_name_to_instantiate = provider_to_use_for_routing_or_direct_call 
+    neuroswitch_active = False # Default, only set True if classifier actually runs
+    fallback_reason = None # Initialize fallback_reason
 
     # Prepare message content and extract text ...
     if image_data:
@@ -300,34 +301,78 @@ def chat():
         message_content = message
         text_input_for_classification = message # Use the whole message if no image
 
-    # --- NeuroSwitch Logic ---    
-    # This block now only runs if is_direct_provider_request is False AND provider_to_use_for_routing_or_direct_call is NEUROSWITCH_PROVIDER_NAME
-    
+    # Classifier runs if it was NOT a direct request AND the chosen path was NeuroSwitch
     if not is_direct_provider_request and provider_to_use_for_routing_or_direct_call == NEUROSWITCH_PROVIDER_NAME:
         logging.info(f"NeuroSwitch classifier activated for ID: {req_id}. Classifying input: '{text_input_for_classification[:100]}...' ")
         neuroswitch_status = get_neuroswitch_provider(text_input_for_classification)
-        actual_provider_name_to_instantiate = neuroswitch_status["provider"] # Classifier determines the final provider
-        neuroswitch_active = neuroswitch_status["neuroswitch_active"] # Mark that NeuroSwitch *logic* was active
+        actual_provider_name_to_instantiate = neuroswitch_status["provider"] 
+        neuroswitch_active = neuroswitch_status["neuroswitch_active"] 
         fallback_reason = neuroswitch_status["fallback_reason"]
-        logging.info(f"NeuroSwitch classifier for ID: {req_id} result: Provider='{actual_provider_name_to_instantiate}', Active(Logic)={neuroswitch_active}, Reason='{fallback_reason}'")
+        logging.info(f"NeuroSwitch classifier for ID: {req_id} result: Provider='{actual_provider_name_to_instantiate}', Classifier Active Flag={neuroswitch_active}, Reason='{fallback_reason}'")
     elif is_direct_provider_request:
-        # neuroswitch_active remains False as we are bypassing the classifier
-        actual_provider_name_to_instantiate = provider_to_use_for_routing_or_direct_call # Already set
-        logging.info(f"Using DDIRECTLY specified provider for ID: {req_id}: {actual_provider_name_to_instantiate}. NeuroSwitch classifier bypassed.")
+        # Direct provider was chosen, classifier is bypassed.
+        # actual_provider_name_to_instantiate is already correctly set from provider_to_use_for_routing_or_direct_call
+        logging.info(f"Chat ID: {req_id}. Using DIRECTLY specified provider: {actual_provider_name_to_instantiate}. NeuroSwitch classifier bypassed.")
+        # neuroswitch_active remains False
     else:
-        # This case implies provider_to_use_for_routing_or_direct_call was a direct provider name but somehow is_direct_provider_request was false.
-        # Should ideally not be reached if logic above is correct. Defaulting to safety.
-        logging.warning(f"Chat ID: {req_id}. Inconsistent state in provider selection. Defaulting to use determined provider '{provider_to_use_for_routing_or_direct_call}' directly. NeuroSwitch classifier bypassed.")
-        actual_provider_name_to_instantiate = provider_to_use_for_routing_or_direct_call
-        neuroswitch_active = False
+        # This case means is_direct_provider_request is False,
+        # AND provider_to_use_for_routing_or_direct_call was NOT NEUROSWITCH_PROVIDER_NAME.
+        # This implies an invalid provider name was given that wasn't a direct key, alias, or NeuroSwitch alias.
+        # We'll attempt to use what was decided directly, but log an error as this path is unexpected.
+        logging.error(f"Chat ID: {req_id}. Unexpected provider routing state. Provider for routing was '{provider_to_use_for_routing_or_direct_call}' but not NeuroSwitch, and not flagged as a direct request. Attempting to use it directly. NeuroSwitch classifier bypassed.")
+        actual_provider_name_to_instantiate = provider_to_use_for_routing_or_direct_call 
+        # neuroswitch_active remains False
 
     # --- End NeuroSwitch Logic ---
 
+    # NEW: API Key Selection Logic
+    selected_key_to_pass_to_factory = None
+    key_source_for_logging = "Unknown" 
+
+    if actual_provider_name_to_instantiate == "openai":
+        if openai_user_key:
+            selected_key_to_pass_to_factory = openai_user_key
+            key_source_for_logging = "X-OpenAI-API-Key header"
+        else:
+            selected_key_to_pass_to_factory = Config.OPENAI_API_KEY
+            key_source_for_logging = ".env (OPENAI_API_KEY)"
+    elif actual_provider_name_to_instantiate == "claude":
+        if claude_user_key:
+            selected_key_to_pass_to_factory = claude_user_key
+            key_source_for_logging = "X-Claude-API-Key header"
+        else:
+            selected_key_to_pass_to_factory = Config.ANTHROPIC_API_KEY
+            key_source_for_logging = ".env (ANTHROPIC_API_KEY)"
+    elif actual_provider_name_to_instantiate == "gemini":
+        if gemini_user_key:
+            selected_key_to_pass_to_factory = gemini_user_key
+            key_source_for_logging = "X-Gemini-API-Key header"
+        else:
+            selected_key_to_pass_to_factory = Config.GEMINI_API_KEY
+            key_source_for_logging = ".env (GEMINI_API_KEY)"
+    else:
+        logging.error(f"[Chat ID: {req_id}] Unknown provider '{actual_provider_name_to_instantiate}' determined. Cannot select API key.")
+        # Consider returning an error response here
+        return jsonify({
+            'response': f"Error: Unknown provider '{actual_provider_name_to_instantiate}' specified.",
+            'provider_used': actual_provider_name_to_instantiate,
+            'neuroswitch_active': neuroswitch_active,
+            'fallback_reason': fallback_reason, # Already initialized
+            'token_usage': {'total_tokens': current_total_tokens_used, 'max_tokens': Config.MAX_CONVERSATION_TOKENS}
+        }), 500
+
+    if selected_key_to_pass_to_factory:
+        logging.info(f"[Chat ID: {req_id}] Attempting to initialize provider '{actual_provider_name_to_instantiate}' using API key from: {key_source_for_logging}.")
+    else:
+        # This log indicates that neither a user-provided header key NOR a .env key was found for the selected provider.
+        logging.warning(f"[Chat ID: {req_id}] No API key found for provider '{actual_provider_name_to_instantiate}' from header or .env. Provider initialization will likely fail or use a non-functional default.")
+    # END NEW
+
     try:
-        # Create provider instance using the determined name
-        provider = ProviderFactory.create_provider(actual_provider_name_to_instantiate)
+        # B. Pass selected_key_to_pass_to_factory to ProviderFactory 
+        provider = ProviderFactory.create_provider(actual_provider_name_to_instantiate, api_key=selected_key_to_pass_to_factory)
     except ValueError as e:
-         logging.error(f"Failed to create provider instance '{actual_provider_name_to_instantiate}' for ID: {req_id}: {e}")
+         logging.error(f"[Chat ID: {req_id}] Failed to create provider instance '{actual_provider_name_to_instantiate}': {e}")
          return jsonify({
              'response': f"Error: Could not initialize AI provider '{actual_provider_name_to_instantiate}'. Please select a valid provider or check configuration.",
              'provider_used': actual_provider_name_to_instantiate,
@@ -346,15 +391,15 @@ def chat():
          }), 500 # Server error
     
     try:
-        # Call assistant.chat, PASSING the mode
+        # Call assistant.chat, REMOVE x_provider_api_key
         result_data = assistant.chat(
             user_input=message_content,
-            provider=provider,
-            conversation_history=current_conversation_history, # Pass current history for this session
-            total_tokens_used=current_total_tokens_used,       # Pass current tokens for this session
+            provider=provider, 
+            conversation_history=current_conversation_history, 
+            total_tokens_used=current_total_tokens_used,       
             mode=mode,
-            # Pass request_id for logging within assistant if needed, though assistant should be mostly agnostic
-            # request_id=req_id 
+            request_id=req_id
+            # REMOVED: x_provider_api_key=x_provider_api_key 
         )
 
         # Save the updated history and tokens back to the correct session store
