@@ -46,7 +46,8 @@ class GeminiProvider(BaseProvider):
             # app.py has already logged the original source (header or .env)
             try:
                 genai.configure(api_key=final_api_key_to_use)
-                model_name = getattr(Config, 'GEMINI_MODEL', 'gemini-1.5-flash-latest') 
+                # Directly use Config.GEMINI_MODEL as it now has a guaranteed default
+                model_name = Config.GEMINI_MODEL 
                 self.model = genai.GenerativeModel(model_name)
                 self.logger.info(f"Gemini client configured with the API key selected by application logic for model: {model_name}")
             except Exception as e:

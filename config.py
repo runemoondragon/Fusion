@@ -8,7 +8,12 @@ class Config:
     ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY')
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
     GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-    MODEL = "claude-3-5-sonnet-20241022"
+
+    # Model configurations with defaults
+    MODEL = os.getenv('MODEL', "claude-3-5-sonnet-20241022")  # For Claude
+    OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")       # Default for OpenAI
+    GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash-latest") # Default for Gemini
+
     MAX_TOKENS = 8000
     MAX_CONVERSATION_TOKENS = 200000  # Maximum tokens per conversation
 

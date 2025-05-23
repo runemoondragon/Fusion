@@ -294,9 +294,8 @@ class OpenAIProvider(BaseProvider):
         formatted_history = self._format_messages_for_openai(user_messages)
         self.logger.debug(f"OpenAIProvider: Messages after formatting by _format_messages_for_openai (sent to API): {json.dumps(formatted_history, indent=2)}")
 
-        # Determine the model to use (can be made dynamic later)
-        # Defaulting to gpt-4o-mini for cost/performance balance
-        model_name = getattr(config, 'OPENAI_MODEL', 'gpt-4o-mini')
+        # Directly use Config.OPENAI_MODEL as it now has a guaranteed default
+        model_name = Config.OPENAI_MODEL
         self.logger.debug(f"Using OpenAI model: {model_name}")
 
         request_params = {
