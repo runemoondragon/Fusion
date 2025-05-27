@@ -36,26 +36,38 @@ def _recursively_convert_mappings_to_dict(item: Any) -> Any:
 class GeminiProvider(BaseProvider):
     """Provider implementation for Google's Gemini API."""
 
-    def __init__(self, api_key: str = None):
+    def __init__(self, api_key: str = None, client_model: str = None):
         self.logger = logging.getLogger(__name__)
         self.model = None
+        self.client_model = client_model
+        self._effective_model_name_used = None # NEW: Instance variable to store the model name
 
-        final_api_key_to_use = api_key # This is the key selected by app.py
+        final_api_key_to_use = api_key
 
         if final_api_key_to_use:
-            # app.py has already logged the original source (header or .env)
             try:
                 genai.configure(api_key=final_api_key_to_use)
-                # Directly use Config.GEMINI_MODEL as it now has a guaranteed default
-                model_name = Config.GEMINI_MODEL 
-                self.model = genai.GenerativeModel(model_name)
-                self.logger.info(f"Gemini client configured with the API key selected by application logic for model: {model_name}")
+                
+                effective_model_name = None # Renamed for clarity within __init__ scope
+                if self.client_model:
+                    effective_model_name = self.client_model
+                    self.logger.info(f"Using client-specified Gemini model: {effective_model_name}")
+                else:
+                    effective_model_name = Config.GEMINI_MODEL
+                    self.logger.info(f"Using configured/default Gemini model: {effective_model_name}")
+                
+                self._effective_model_name_used = effective_model_name # Store it
+                self.model = genai.GenerativeModel(self._effective_model_name_used)
+                self.logger.info(f"Gemini client configured with API key for model: {self._effective_model_name_used}")
             except Exception as e:
-                self.logger.exception(f"Failed to configure Gemini client with the API key selected by application logic: {e}")
-                self.model = None # Ensure model is None if configuration fails
+                # Log which model it attempted to use if possible
+                attempted_model_for_log = self.client_model if self.client_model else Config.GEMINI_MODEL
+                self.logger.exception(f"Failed to configure Gemini client with API key for model {attempted_model_for_log}: {e}")
+                self.model = None
+                self._effective_model_name_used = None # Ensure it's None if init fails
         else:
-            self.logger.warning(f"No API key was determined by application logic for Gemini. Gemini provider will not work.")
-            # self.model remains None
+            self.logger.warning(f"No API key for Gemini. Gemini provider will not work.")
+            self._effective_model_name_used = None # Ensure it's None if no API key
 
     @property
     def name(self) -> str:
@@ -324,11 +336,15 @@ class GeminiProvider(BaseProvider):
             }
 
             self.logger.debug(f"Gemini usage: input_tokens={input_token_count}, output_tokens={output_token_count}, runtime={runtime}")
-            return {
+            
+            return_dict = {
                 'content': response_content,
                 'usage': usage_dict,
-                'stop_reason': finish_reason.lower()
+                'stop_reason': finish_reason.lower(),
+                'model_used': self._effective_model_name_used 
             }
+            self.logger.debug(f"GeminiProvider returning: {json.dumps(return_dict)}")
+            return return_dict
 
         except Exception as e:
             self.logger.exception("An unexpected error occurred during Gemini API call")

@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, url_for, session
+from flask import Flask, render_template, request, jsonify, url_for, session, send_from_directory
 from ce3 import Assistant
 import os
 from werkzeug.utils import secure_filename
@@ -21,6 +21,12 @@ app.secret_key = os.getenv('FLASK_SECRET_KEY', os.urandom(24))
 
 # Ensure upload directory exists
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+# Ensure base generated files directory exists
+if hasattr(Config, 'GENERATED_FILES_DIR') and Config.GENERATED_FILES_DIR:
+    os.makedirs(Config.GENERATED_FILES_DIR, exist_ok=True)
+    logging.info(f"Ensured base directory for generated files exists: {Config.GENERATED_FILES_DIR}")
+else:
+    logging.warning("Config.GENERATED_FILES_DIR is not set. File generation by tools might fail or use a default relative path.")
 
 # Assistant is instantiated once, its methods will operate on passed-in history & tokens
 assistant = Assistant()
@@ -204,10 +210,13 @@ def chat():
     # No longer needed as we use specific keys above.
 
     data = request.json
-    message = data.get('message', '')
-    image_data = data.get('image')
+    logging.debug(f"API Chat ID: {req_id}. Full request JSON data: {data}")
+
+    message = data.get('message')
+    image_data = data.get('image_data') 
     mode = data.get('mode')
-    
+    client_specified_model = data.get('model') # ITEM 1: Extract client-specified model
+
     # --- Refined Provider Selection Logic for API and Flask UI ---
     is_direct_provider_request = False 
     provider_to_use_for_routing_or_direct_call = None # Will hold the name for direct instantiation or NEUROSWITCH_PROVIDER_NAME
@@ -368,9 +377,14 @@ def chat():
         logging.warning(f"[Chat ID: {req_id}] No API key found for provider '{actual_provider_name_to_instantiate}' from header or .env. Provider initialization will likely fail or use a non-functional default.")
     # END NEW
 
+    # Instantiate the provider (either direct or chosen by NeuroSwitch)
+    logging.info(f"API Chat ID: {req_id}. Attempting to instantiate provider: '{actual_provider_name_to_instantiate}' with key from '{key_source_for_logging}'. Client-specified model: '{client_specified_model}'.") # ITEM 2: Update log message
     try:
-        # B. Pass selected_key_to_pass_to_factory to ProviderFactory 
-        provider = ProviderFactory.create_provider(actual_provider_name_to_instantiate, api_key=selected_key_to_pass_to_factory)
+        provider = ProviderFactory.create_provider(
+            actual_provider_name_to_instantiate, 
+            api_key=selected_key_to_pass_to_factory,
+            client_model=client_specified_model # ITEM 3: Pass client_specified_model to factory
+        )
     except ValueError as e:
          logging.error(f"[Chat ID: {req_id}] Failed to create provider instance '{actual_provider_name_to_instantiate}': {e}")
          return jsonify({
@@ -402,6 +416,8 @@ def chat():
             # REMOVED: x_provider_api_key=x_provider_api_key 
         )
 
+        logging.debug(f"App.py: Data received from assistant.chat: {json.dumps(result_data)}")
+
         # Save the updated history and tokens back to the correct session store
         save_session_data(req_id, req_type, result_data['updated_conversation_history'], result_data['updated_total_tokens_used'])
         logging.info(f"Chat successful for ID: {req_id}. New history length: {len(result_data['updated_conversation_history'])}. New Tokens: {result_data['updated_total_tokens_used']}")
@@ -409,6 +425,8 @@ def chat():
         response_text = result_data.get('response', "[No response text received]")
         tool_name = result_data.get('tool_name')
         usage_from_assistant = result_data.get('usage', {}) # This is per-call usage
+        model_actually_used = result_data.get('model_used') # ITEM 1: Extract model_used
+        file_downloads_from_assistant = result_data.get('file_downloads') # Extract file_downloads
         
         token_usage_response = {
             'input_tokens': usage_from_assistant.get('input_tokens'),
@@ -421,10 +439,12 @@ def chat():
         return jsonify({
             'response': response_text,
             'tool_name': tool_name,
-            'provider_used': actual_provider_name_to_instantiate, # Reflect the actual provider instance used
-            'neuroswitch_active': neuroswitch_active, # This now reflects if NeuroSwitch *classifier logic* ran
+            'provider_used': actual_provider_name_to_instantiate, 
+            'model_used': model_actually_used, # ITEM 2: Include model_used in the response
+            'neuroswitch_active': neuroswitch_active, 
             'fallback_reason': fallback_reason,
-            'token_usage': token_usage_response
+            'token_usage': token_usage_response,
+            'file_downloads': file_downloads_from_assistant # Add file_downloads to the response
         })
         
     except Exception as e:
@@ -507,6 +527,61 @@ def reset():
         status_message = f"Conversation reset for Flask session ID: {req_id}"
         
     return jsonify({'status': 'success', 'message': status_message})
+
+@app.route('/download_file/<request_id_from_url>/<path:filename>', methods=['GET'])
+def download_generated_file(request_id_from_url: str, filename: str):
+    current_req_id, req_type = get_request_identifier_and_type()
+    logging.debug(f"Download attempt for file '{filename}' under request_id_from_url '{request_id_from_url}'. Current session req_id: '{current_req_id}', type: '{req_type}'.")
+
+    # Security Check: Ensure the request_id in the URL matches the current session's ID
+    # This is crucial to prevent users from accessing other users' files.
+    if request_id_from_url != current_req_id:
+        logging.warning(f"Forbidden download attempt: URL request_id '{request_id_from_url}' does not match session req_id '{current_req_id}'.")
+        return jsonify({'error': 'Forbidden. You do not have permission to access this file.'}), 403
+
+    # Sanitize the filename from the URL path
+    safe_filename = secure_filename(filename)
+    if not safe_filename or safe_filename != filename: # Check if secure_filename altered it (e.g., removed path components) or emptied it
+        logging.warning(f"Download attempt with potentially unsafe filename rejected. Original: '{filename}', Secured: '{safe_filename}'.")
+        return jsonify({'error': 'Invalid filename.'}), 400
+
+    try:
+        # Construct the directory path for this specific request_id
+        # Config.GENERATED_FILES_DIR should be an absolute path or resolvable relative to app root.
+        # It's safer if Config.GENERATED_FILES_DIR is an absolute path.
+        # For send_from_directory, the first argument is the directory, and the second is the path (filename) relative to that directory.
+        session_specific_dir = os.path.join(Config.GENERATED_FILES_DIR, request_id_from_url)
+        
+        logging.info(f"Attempting to send file '{safe_filename}' from directory '{session_specific_dir}' for req_id '{current_req_id}'.")
+
+        # Ensure the base generated files directory exists (though subdirs are made by the tool)
+        if not os.path.isdir(Config.GENERATED_FILES_DIR):
+            logging.error(f"Configuration error: Config.GENERATED_FILES_DIR ('{Config.GENERATED_FILES_DIR}') does not exist.")
+            return jsonify({'error': 'Server configuration error preventing file download.'}), 500
+        
+        # Check if the session-specific directory exists
+        if not os.path.isdir(session_specific_dir):
+            logging.warning(f"File download failed: Session directory '{session_specific_dir}' not found for file '{safe_filename}'.")
+            return jsonify({'error': 'File not found (session directory missing).'}), 404
+            
+        # Check if the file itself exists within that directory
+        file_path_to_check = os.path.join(session_specific_dir, safe_filename)
+        if not os.path.isfile(file_path_to_check):
+            logging.warning(f"File download failed: File '{safe_filename}' not found in '{session_specific_dir}'.")
+            return jsonify({'error': 'File not found.'}), 404
+
+        return send_from_directory(
+            directory=session_specific_dir, 
+            path=safe_filename, # path is relative to 'directory'
+            as_attachment=True
+        )
+
+    except FileNotFoundError: # Should be caught by checks above, but as a fallback
+        logging.warning(f"File not found for download: '{safe_filename}' in session dir for '{request_id_from_url}'.")
+        return jsonify({'error': 'File not found.'}), 404
+    except Exception as e:
+        logging.exception(f"Error during file download for req_id '{current_req_id}', file '{safe_filename}': {e}")
+        return jsonify({'error': 'An unexpected error occurred while trying to download the file.'}), 500
 
 if __name__ == '__main__':
     # Use debug=True for development, False for production

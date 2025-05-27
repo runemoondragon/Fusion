@@ -17,9 +17,10 @@ from config import Config
 class OpenAIProvider(BaseProvider):
     """Provider implementation for OpenAI's ChatGPT API."""
 
-    def __init__(self, api_key: str = None):
+    def __init__(self, api_key: str = None, client_model: str = None):
         self.logger = logging.getLogger(__name__)
         self.client = None 
+        self.client_model = client_model
 
         final_api_key_to_use = api_key # This is the key selected by app.py
 
@@ -294,12 +295,18 @@ class OpenAIProvider(BaseProvider):
         formatted_history = self._format_messages_for_openai(user_messages)
         self.logger.debug(f"OpenAIProvider: Messages after formatting by _format_messages_for_openai (sent to API): {json.dumps(formatted_history, indent=2)}")
 
-        # Directly use Config.OPENAI_MODEL as it now has a guaranteed default
-        model_name = Config.OPENAI_MODEL
-        self.logger.debug(f"Using OpenAI model: {model_name}")
+        # ITEM 2: Modified Model Selection Logic
+        model_name_to_use = None
+        if self.client_model:
+            model_name_to_use = self.client_model
+            self.logger.info(f"Using client-specified OpenAI model: {model_name_to_use}")
+        else:
+            model_name_to_use = Config.OPENAI_MODEL # Assumes Config.OPENAI_MODEL has a default
+            self.logger.info(f"Using configured/default OpenAI model: {model_name_to_use}")
+        # END ITEM 2
 
         request_params = {
-            "model": model_name,
+            "model": model_name_to_use, # Use the determined model name
             "messages": formatted_history,
             "tools": openai_tools if openai_tools else None,
             "tool_choice": "auto" if openai_tools else None,
@@ -361,9 +368,10 @@ class OpenAIProvider(BaseProvider):
 
             self.logger.debug(f"OpenAI usage: input_tokens={usage_dict['input_tokens']}, output_tokens={usage_dict['output_tokens']}, runtime={runtime}")
             return {
-                'content': response_content, # Return list similar to Claude
+                'content': response_content, 
                 'usage': usage_dict,
-                'stop_reason': finish_reason
+                'stop_reason': finish_reason,
+                'model_used': model_name_to_use
             }
 
         except openai.APIConnectionError as e:

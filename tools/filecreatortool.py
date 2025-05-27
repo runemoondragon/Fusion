@@ -4,6 +4,8 @@ import json
 from typing import Union, List, Dict
 from pathlib import Path
 import logging # Added for logging
+from werkzeug.utils import secure_filename # Added
+from config import Config # Added
 
 class FileCreatorTool(BaseTool):
     name = "filecreatortool"
@@ -105,12 +107,21 @@ class FileCreatorTool(BaseTool):
         Execute the file creation process.
         
         Args:
+            request_id: The unique identifier for the current request/session.
             **kwargs: Must contain 'files' key with either a dict or list of dicts
-                     Each dict must have 'path' and 'content' keys
+                     Each dict must have 'path' and 'content' keys. 'path' is expected to be a filename.
         
         Returns:
             str: JSON string containing results of file creation operations
         """
+        # Extract request_id which is now a named argument, not in kwargs
+        request_id = kwargs.pop("request_id", None)
+        if not request_id:
+            return json.dumps({
+                'created_files': 0, 'failed_files': 0, # Assuming 0 files if request_id is missing
+                'results': [{'path': None, 'success': False, 'error': "Critical: request_id was not provided to FileCreatorTool."}]
+            }, indent=2)
+
         files_arg_value = kwargs.get('files')
 
         # Gemini-specific correction for over-nesting
@@ -167,30 +178,44 @@ class FileCreatorTool(BaseTool):
         
         for file_spec in processed_file_specs:
             path_str = None 
+            original_input_filename = None # To store the filename LLM intended
             try:
                 if not isinstance(file_spec, dict):
                     results.append({'path': None, 'success': False, 'error': f'Invalid file spec type: {type(file_spec)}. Expected dict.'})
                     continue
 
-                path_str = file_spec.get('path')
+                original_input_filename = file_spec.get('path') # This is now treated as a filename
                 content = file_spec.get('content') 
 
-                if not path_str:
-                    results.append({'path': None, 'success': False, 'error': "Missing 'path' in file spec."})
+                if not original_input_filename:
+                    results.append({'path': None, 'success': False, 'error': "Missing 'path' (expected filename) in file spec."})
                     continue
                 
-                # 'content' is required by the schema for each file item.
-                # It can be an empty string or an empty dict, but not None.
                 if content is None:
-                     results.append({'path': path_str, 'success': False, 'error': "Missing 'content' in file spec."})
+                     results.append({'path': original_input_filename, 'success': False, 'error': "Missing 'content' in file spec."})
                      continue
 
-                path = Path(path_str)
+                # Sanitize the filename provided by the LLM
+                safe_filename = secure_filename(original_input_filename)
+                if not safe_filename: # secure_filename returns empty if input is bad (e.g., just "..")
+                    results.append({'path': original_input_filename, 'success': False, 'error': f"Invalid filename provided: '{original_input_filename}'. Could not be secured."})
+                    continue
+
+                # Determine base directory from Config
+                base_generated_files_dir = Path(getattr(Config, 'GENERATED_FILES_DIR', './generated_files')) # Default if not in Config
+                
+                # Create session-specific directory
+                session_specific_dir = base_generated_files_dir / request_id
+                session_specific_dir.mkdir(parents=True, exist_ok=True)
+
+                # Final path for saving the file
+                actual_save_path = session_specific_dir / safe_filename
+                
                 binary = file_spec.get('binary', False)
                 encoding = file_spec.get('encoding', 'utf-8')
 
-                # Create parent directories
-                path.parent.mkdir(parents=True, exist_ok=True)
+                # Create parent directories (already handled by session_specific_dir.mkdir)
+                # actual_save_path.parent.mkdir(parents=True, exist_ok=True) # Redundant now
 
                 # Handle content
                 if isinstance(content, dict):
@@ -201,21 +226,23 @@ class FileCreatorTool(BaseTool):
                 if binary:
                     if isinstance(content, str):
                         content = content.encode(encoding)
-                    with open(path, mode) as f:
+                    with open(actual_save_path, mode) as f:
                         f.write(content)
                 else:
-                    with open(path, mode, encoding=encoding, newline='') as f:
+                    with open(actual_save_path, mode, encoding=encoding, newline='') as f:
                         f.write(content)
 
                 results.append({
-                    'path': str(path),
+                    'path': safe_filename, # Return only the secured filename
+                    'original_input_path': original_input_filename, # For reference if needed
+                    'full_server_path': str(actual_save_path), # For server-side logging/debugging
                     'success': True,
-                    'size': path.stat().st_size
+                    'size': actual_save_path.stat().st_size
                 })
 
             except Exception as e:
                 results.append({
-                    'path': str(path) if 'path' in locals() and path is not None else path_str if path_str is not None else None,
+                    'path': safe_filename if 'safe_filename' in locals() and safe_filename else original_input_filename,
                     'success': False,
                     'error': str(e)
                 })

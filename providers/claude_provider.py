@@ -2,6 +2,7 @@ import anthropic
 from typing import List, Dict, Any
 import logging
 import time
+import json
 
 from .base_provider import BaseProvider
 from config import Config
@@ -9,9 +10,10 @@ from config import Config
 class ClaudeProvider(BaseProvider):
     """Provider implementation for Anthropic's Claude API."""
 
-    def __init__(self, api_key: str = None):
+    def __init__(self, api_key: str = None, client_model: str = None):
         self.logger = logging.getLogger(__name__)
         self.client = None
+        self.client_model = client_model
 
         final_api_key_to_use = api_key # This is the key selected by app.py
 
@@ -54,10 +56,22 @@ class ClaudeProvider(BaseProvider):
             else:
                 processed_messages.append(msg)
 
+        self.logger.debug(f"ClaudeProvider: History after formatting (sent to API): {json.dumps(processed_messages, indent=2)}")
+
+        # ITEM 2: Modified Model Selection Logic
+        model_name_to_use = None
+        if self.client_model:
+            model_name_to_use = self.client_model
+            self.logger.info(f"Using client-specified Claude model: {model_name_to_use}")
+        else:
+            model_name_to_use = Config.MODEL # Assumes Config.MODEL has a default
+            self.logger.info(f"Using configured/default Claude model: {model_name_to_use}")
+        # END ITEM 2
+
         try:
             start_time = time.time()
             response = self.client.messages.create(
-                model=config.MODEL,
+                model=model_name_to_use, # Use the determined model name
                 max_tokens=config.MAX_TOKENS,
                 temperature=config.DEFAULT_TEMPERATURE,
                 system=self._get_system_prompt(),
@@ -81,6 +95,7 @@ class ClaudeProvider(BaseProvider):
                     'runtime': runtime
                 },
                 'stop_reason': response.stop_reason,
+                'model_used': model_name_to_use,
                 # Add other relevant fields if needed
                 'id': response.id,
                 'model': response.model,

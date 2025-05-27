@@ -280,7 +280,7 @@ class Assistant:
             return "[base64 data omitted]"
         return data
 
-    def _execute_tool(self, tool_use_block: Any, current_conversation_for_tool_context: List[Dict[str, Any]]) -> str:
+    def _execute_tool(self, tool_use_block: Any, current_conversation_for_tool_context: List[Dict[str, Any]], request_id: str) -> str:
         """
         Execute a tool based on the tool_use_block from the LLM.
         Args:
@@ -288,6 +288,7 @@ class Assistant:
                             Expected to have 'name' and 'input' attributes/keys.
             current_conversation_for_tool_context: The current conversation history, passed for potential
                                                    context if a tool ever needs it (though tools should aim to be stateless).
+            request_id: The unique request identifier, to be passed to tools that need it (e.g., filecreatortool).
         Returns:
             A string result from the tool execution.
         """
@@ -338,7 +339,17 @@ class Assistant:
                 return f"Error: Tool '{tool_name}' could not be loaded for execution."
 
             logging.info(f"Executing tool: {tool_name} with input: {tool_input}")
-            result = tool_instance.execute(**tool_input) # Execute the tool's method
+            
+            # Prepare arguments for the tool's execute method
+            execute_kwargs = tool_input
+            # If the tool is filecreatortool, inject request_id
+            # A more generic way would be to inspect tool_instance.execute signature
+            # or have tools declare if they need request_id.
+            if tool_name == "filecreatortool":
+                execute_kwargs['request_id'] = request_id
+                logging.info(f"Injected request_id '{request_id}' for filecreatortool.")
+
+            result = tool_instance.execute(**execute_kwargs) # Execute the tool's method
             
             if Config.SHOW_TOOL_USAGE:
                 self._display_tool_usage(tool_name, tool_input, result) # Uses self.console
@@ -440,9 +451,11 @@ class Assistant:
         # 5. Main interaction loop (for potential tool use)
         MAX_TOOL_LOOPS = Config.MAX_TOOL_CALLS if hasattr(Config, 'MAX_TOOL_CALLS') else 5 # Default to 5 loops
         loop_count = 0
-        last_api_response_data = {'usage': {'input_tokens': 0, 'output_tokens': 0, 'runtime': 0}} # For token/usage tracking
+        last_api_response_data = {'usage': {'input_tokens': 0, 'output_tokens': 0, 'runtime': 0}}
+        model_name_from_provider = None # ADD THIS: To store model_used from provider
         final_response_text_parts = []
         tool_name_invoked_in_turn = None
+        generated_file_downloads = [] # Initialize list for download info
 
         while loop_count < MAX_TOOL_LOOPS:
             loop_count += 1
@@ -464,8 +477,8 @@ class Assistant:
                     tools=self.tools, # List of tool schemas
                     config=Config
                 )
-                # api_response is dict: {'content': ..., 'usage': ..., 'stop_reason': ..., etc.}
-                last_api_response_data = api_response # Store for usage and other details
+                last_api_response_data = api_response
+                model_name_from_provider = api_response.get('model_used') # CAPTURE model_used
 
                 # Accumulate tokens from this call
                 call_input_tokens = api_response.get('usage', {}).get('input_tokens', 0)
@@ -535,26 +548,43 @@ class Assistant:
                     tool_use_id = tool_call_request_block.get('id')
                     tool_name = tool_call_request_block.get('name') # Get name for each call
                     
-                    tool_execution_result_content_str = self._execute_tool(tool_call_request_block, current_conversation_history)
+                    tool_execution_result_content_str = self._execute_tool(
+                        tool_call_request_block, 
+                        current_conversation_history, 
+                        request_id # Pass request_id here
+                    )
                     
-                    # Check for successful filecreatortool execution to modify LLM feedback
+                    # Check for successful filecreatortool execution to modify LLM feedback and prepare download links
                     if tool_name == "filecreatortool":
                         try:
                             tool_output_data = json.loads(tool_execution_result_content_str)
-                            if tool_output_data.get("created_files", 0) > 0 and tool_output_data.get("failed_files", 0) == 0:
-                                logging.info(f"{log_prefix}FileCreatorTool succeeded. Modifying feedback to LLM.")
+                            if tool_output_data.get("created_files", 0) > 0:
+                                logging.info(f"{log_prefix}FileCreatorTool succeeded. Modifying feedback to LLM and preparing download links.")
+                                
+                                successful_files_info = []
+                                for file_res in tool_output_data.get("results", []):
+                                    if file_res.get("success") and file_res.get("path"):
+                                        downloadable_filename = file_res["path"]
+                                        download_url = f"/download_file/{request_id}/{downloadable_filename}"
+                                        generated_file_downloads.append({
+                                            'url': download_url,
+                                            'filename': downloadable_filename
+                                        })
+                                        successful_files_info.append(f"'{downloadable_filename}' (size: {file_res.get('size', 'N/A')} bytes)")
+                                
+                                files_list_str = ", ".join(successful_files_info)
+                                if not files_list_str: files_list_str = "(unknown files)"
+
                                 # Replace the raw JSON output with a more instructive message for the LLM
-                                # This message becomes the content of the tool_result block for this specific tool call.
                                 tool_execution_result_content_str = (
-                                    f"The file creation via '{tool_name}' was successful. "
-                                    f"Details: {json.dumps(tool_output_data)}. "
-                                    f"Please inform the user that the file has been created and do not call any more tools for this request."
+                                    f"The file creation via '{tool_name}' was successful. Files created: {files_list_str}. "
+                                    f"The user has been provided with download link(s). "
+                                    f"Please inform the user that the file(s) have been created and are available for download. Do not offer to display the content unless explicitly asked. Do not call any more tools for this request."
                                 )
-                                # This modified string will be used in the tool_result block below.
                         except json.JSONDecodeError:
                             logging.warning(f"{log_prefix}Could not parse FileCreatorTool output as JSON: {tool_execution_result_content_str}")
                         except Exception as e_fct_parse:
-                            logging.error(f"{log_prefix}Error processing FileCreatorTool output for feedback modification: {e_fct_parse}")
+                            logging.error(f"{log_prefix}Error processing FileCreatorTool output for feedback/download links: {e_fct_parse}")
 
                     tool_result_block = {
                         "type": "tool_result",
@@ -583,6 +613,8 @@ class Assistant:
                     'response': text_to_return,
                     'tool_name': tool_name_invoked_in_turn,
                     'usage': last_api_response_data.get('usage', {}),
+                    'model_used': model_name_from_provider, # ADD THIS to the return dict
+                    'file_downloads': generated_file_downloads, # Add this for app.py to consume
                     'updated_conversation_history': current_conversation_history,
                     'updated_total_tokens_used': current_total_tokens_used
                 }
@@ -608,6 +640,8 @@ class Assistant:
             'response': final_response_str,
             'tool_name': tool_name_invoked_in_turn, # Name of the last tool invoked in the turn
             'usage': last_api_response_data.get('usage', {}), # Usage from the *last* successful LLM call
+            'model_used': model_name_from_provider, # ADD THIS to the return dict
+            'file_downloads': generated_file_downloads, # Add this for app.py to consume
             'updated_conversation_history': current_conversation_history,
             'updated_total_tokens_used': current_total_tokens_used
         }
