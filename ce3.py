@@ -125,21 +125,28 @@ class Assistant:
                     # Handle missing dependencies
                     missing_module = self._parse_missing_dependency(str(e))
                     self.console.print(f"\n[yellow]Missing dependency:[/yellow] {missing_module} for tool {module_info.name}")
-                    user_response = input(f"Would you like to install {missing_module}? (y/n): ").lower()
+                    # --- MODIFICATION: Automatically attempt installation ---
+                    self.console.print(f"[cyan]Attempting to automatically install {missing_module}...[/cyan]")
+                    # user_response = input(f"Would you like to install {missing_module}? (y/n): ").lower() # Old interactive prompt
+                    # if user_response == 'y': # Old condition
 
-                    if user_response == 'y':
-                        success = self._execute_uv_install(missing_module)
-                        if success:
-                            # Retry loading the module after installation
-                            try:
-                                module = importlib.import_module(f'tools.{module_info.name}')
-                                self._extract_tools_from_module(module, tools)
-                            except Exception as retry_err:
-                                self.console.print(f"[red]Failed to load tool after installation: {str(retry_err)}[/red]")
-                        else:
-                            self.console.print(f"[red]Installation of {missing_module} failed. Skipping this tool.[/red]")
+                    success = self._execute_uv_install(missing_module)
+                    if success:
+                        self.console.print(f"[green]Successfully installed {missing_module}. Attempting to reload tool {module_info.name}...[/green]")
+                        # Retry loading the module after installation
+                        try:
+                            # It's important to ensure sys.path is correct or modules are re-discoverable after new install.
+                            # importlib.invalidate_caches() # May help in some complex scenarios
+                            module = importlib.import_module(f'tools.{module_info.name}')
+                            self._extract_tools_from_module(module, tools)
+                            self.console.print(f"[green]Tool {module_info.name} loaded successfully after dependency installation.[/green]")
+                        except Exception as retry_err:
+                            self.console.print(f"[red]Failed to load tool {module_info.name} after installation: {str(retry_err)}[/red]")
                     else:
-                        self.console.print(f"[yellow]Skipping tool {module_info.name} due to missing dependency[/yellow]")
+                        self.console.print(f"[red]Automatic installation of {missing_module} failed. Skipping tool {module_info.name}.[/red]")
+                    # else: # Old condition
+                    #    self.console.print(f"[yellow]Skipping tool {module_info.name} due to missing dependency[/yellow]")
+                    # --- END MODIFICATION ---
                 except Exception as mod_err:
                     self.console.print(f"[red]Error loading module {module_info.name}:[/red] {str(mod_err)}")
         except Exception as overall_err:
