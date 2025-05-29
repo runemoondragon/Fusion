@@ -18,6 +18,8 @@ import context_sanitizer  # Add this import at the top
 
 from config import Config
 from tools.base import BaseTool
+# Import the UVPackageManager tool directly for use during setup
+from tools.uvpackagemanager import UVPackageManager 
 # Import the provider base and potentially the factory if needed
 from providers.base_provider import BaseProvider 
 # Import specific provider classes for type checking
@@ -77,20 +79,34 @@ class Assistant:
         Execute the uvpackagemanager tool directly to install the missing package.
         Returns True if installation seems successful (no errors in output), otherwise False.
         """
-        class ToolUseMock:
-            name = "uvpackagemanager"
-            input = {
-                "command": "install",
-                "packages": [package_name]
-            }
+        # class ToolUseMock:
+        #     name = "uvpackagemanager"
+        #     input = {
+        #         "command": "install",
+        #         "packages": [package_name]
+        #     }
 
-        result = self._execute_tool(
-            ToolUseMock(), 
-            current_conversation_for_tool_context=[], # Pass an empty list as placeholder
-            request_id="TOOL_INSTALLER_CONTEXT" # Pass a placeholder string
-        )
-        if "Error" not in result and "failed" not in result.lower():
-            self.console.print("[green]The package was installed successfully.[/green]")
+        # result = self._execute_tool(
+        #     ToolUseMock(), 
+        #     current_conversation_for_tool_context=[], # Pass an empty list as placeholder
+        #     request_id="TOOL_INSTALLER_CONTEXT" # Pass a placeholder string
+        # )
+
+        try:
+            self.console.print(f"[cyan]Directly invoking UVPackageManager to install '{package_name}'...[/cyan]")
+            installer_tool = UVPackageManager() # Instantiate directly
+            result = installer_tool.execute(
+                command="install", 
+                packages=[package_name]
+            )
+            logging.info(f"UVPackageManager execution result for '{package_name}': {result}")
+        except Exception as e:
+            self.console.print(f"[red]Error during direct UVPackageManager execution for '{package_name}': {e}[/red]")
+            logging.exception(f"Exception details for UVPackageManager direct call for '{package_name}':")
+            return False
+
+        if "Error" not in result and "failed" not in result.lower() and "Traceback" not in result:
+            self.console.print(f"[green]Package '{package_name}' appears to have been installed successfully via UVPackageManager.[/green]")
             return True
         else:
             self.console.print(f"[red]Failed to install {package_name}. Output:[/red] {result}")
