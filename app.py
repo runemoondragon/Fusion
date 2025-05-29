@@ -1,9 +1,11 @@
-from flask import Flask, render_template, request, jsonify, url_for, session, send_from_directory
+from flask import Flask, render_template, request, jsonify, url_for, session, send_from_directory, Response
 from ce3 import Assistant
 import os
 from werkzeug.utils import secure_filename
 import base64
 from config import Config
+from dotenv import load_dotenv
+load_dotenv()
 # Import the factory
 from providers.provider_factory import ProviderFactory
 import logging # Add logging
@@ -11,6 +13,7 @@ import logging # Add logging
 from neuroswitch_classifier import get_neuroswitch_provider, DEFAULT_PROVIDER
 import uuid # For generating unique IDs
 import json # Added for json.dumps in reset route
+from functools import wraps # Added wraps
 
 app = Flask(__name__, static_folder='static')
 app.config['UPLOAD_FOLDER'] = 'uploads'
@@ -70,6 +73,37 @@ NEUROSWITCH_ROUTER_ALIASES = {
 # Value: {'conversation_history': [], 'total_tokens_used': 0}
 api_client_session_store = {}
 
+# --- Basic Auth Definition ---
+# EXPECTED_USERNAME = "admin" # Old hardcoded value
+# EXPECTED_PASSWORD = "onlyadmincanusethis" # Old hardcoded value
+EXPECTED_USERNAME = os.getenv("FLASK_BASIC_AUTH_USERNAME")
+EXPECTED_PASSWORD = os.getenv("FLASK_BASIC_AUTH_PASSWORD")
+
+def check_auth(username, password):
+    """This function is called to check if a username / password combination is valid."""
+    # Ensure that expected values are set, otherwise auth will always fail silently or pass if both are None and provided are None.
+    if not EXPECTED_USERNAME or not EXPECTED_PASSWORD:
+        logging.warning("Basic Auth username or password not set in environment. Auth will fail.")
+        return False
+    return username == EXPECTED_USERNAME and password == EXPECTED_PASSWORD
+
+def authenticate():
+    """Sends a 401 response that enables basic auth"""
+    return Response(
+    'Could not verify your access level for that URL.\n'
+    'You have to login with proper credentials', 401,
+    {'WWW-Authenticate': 'Basic realm="Login Required"'})
+
+def requires_basic_auth(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        auth = request.authorization
+        if not auth or not check_auth(auth.username, auth.password):
+            return authenticate()
+        return f(*args, **kwargs)
+    return decorated
+# --- End Basic Auth Definition ---
+
 def get_request_identifier_and_type() -> tuple[str, str]:
     """
     Determines the session identifier and type ('api' or 'flask_session').
@@ -125,6 +159,7 @@ def save_session_data(identifier: str, session_type: str, history: list, tokens:
         session.modified = True # Important for Flask to save session changes
 
 @app.route('/')
+@requires_basic_auth # Apply the decorator
 def home():
     req_id, req_type = get_request_identifier_and_type()
     available_providers = ALL_PROVIDERS_WITH_NEUROSWITCH
