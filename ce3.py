@@ -84,7 +84,11 @@ class Assistant:
                 "packages": [package_name]
             }
 
-        result = self._execute_tool(ToolUseMock())
+        result = self._execute_tool(
+            ToolUseMock(), 
+            current_conversation_for_tool_context=[], # Pass an empty list as placeholder
+            request_id="TOOL_INSTALLER_CONTEXT" # Pass a placeholder string
+        )
         if "Error" not in result and "failed" not in result.lower():
             self.console.print("[green]The package was installed successfully.[/green]")
             return True
