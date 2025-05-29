@@ -303,11 +303,21 @@ class Assistant:
         Returns:
             A string result from the tool execution.
         """
-        tool_name = getattr(tool_use_block, 'name', tool_use_block.get('name'))
-        tool_input = getattr(tool_use_block, 'input', tool_use_block.get('input'))
+        tool_name = None
+        tool_input = None
+
+        if hasattr(tool_use_block, 'name') and hasattr(tool_use_block, 'input'):
+            tool_name = tool_use_block.name
+            tool_input = tool_use_block.input
+        elif isinstance(tool_use_block, dict):
+            tool_name = tool_use_block.get('name')
+            tool_input = tool_use_block.get('input')
+        else:
+            logging.error(f"Tool execution error: tool_use_block has an unexpected format. Type: {type(tool_use_block)}, Content: {str(tool_use_block)[:500]}")
+            # This will be caught by the check below
 
         if not tool_name or tool_input is None: # tool_input can be an empty dict {} for no-arg tools
-            logging.error(f"Tool execution error: Missing name or input in tool_use_block: {tool_use_block}")
+            logging.error(f"Tool execution error: Missing name or input in tool_use_block: {str(tool_use_block)[:500]}")
             return "Error: Tool name or input missing in tool request."
 
         # Find the tool definition (schema) from self.tools loaded at init
