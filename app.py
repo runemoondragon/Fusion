@@ -224,18 +224,18 @@ def chat():
     # !!!!! ----- END OF ADDED CRITICAL LOGGING ----- !!!!!
 
     session_data = get_session_data(req_id, req_type)
-    current_conversation_history = session_data['conversation_history']
+    server_stored_history = session_data['conversation_history']
     current_total_tokens_used = session_data['total_tokens_used']
     
     # !!!!! ----- ADDED CRITICAL LOGGING ----- !!!!!
     # Log summary of history AFTER get_session_data
     history_summary_after = []
-    if current_conversation_history:
-        first_msg_role_after = current_conversation_history[0].get('role', 'unknown')
-        first_msg_content_preview_after = str(current_conversation_history[0].get('content', ''))[:50]
+    if server_stored_history:
+        first_msg_role_after = server_stored_history[0].get('role', 'unknown')
+        first_msg_content_preview_after = str(server_stored_history[0].get('content', ''))[:50]
         history_summary_after.append(f"First msg: role={first_msg_role_after}, content='{first_msg_content_preview_after}...'")
-        if len(current_conversation_history) > 1:
-            history_summary_after.append(f"...and {len(current_conversation_history) - 1} more message(s).")
+        if len(server_stored_history) > 1:
+            history_summary_after.append(f"...and {len(server_stored_history) - 1} more message(s).")
     else:
         history_summary_after.append("History is empty.")
     logging.critical(f"Data for req_id '{req_id}' LOADED BY get_session_data: History summary: {', '.join(history_summary_after)}. Tokens: {current_total_tokens_used}")
@@ -246,6 +246,24 @@ def chat():
 
     data = request.json
     logging.debug(f"API Chat ID: {req_id}. Full request JSON data: {data}")
+
+    # --- Get client-provided history if available ---
+    client_provided_history = data.get('history')
+    history_to_use = server_stored_history # Default to server-side history
+    history_source_for_logging = "server_store"
+
+    if client_provided_history is not None and isinstance(client_provided_history, list):
+        logging.info(f"Chat ID: {req_id}. Client provided a history with {len(client_provided_history)} messages. PRIORITIZING client history.")
+        history_to_use = client_provided_history
+        history_source_for_logging = "client_payload"
+        # If client sends history, they are responsible for its integrity.
+        # We might need to re-calculate current_total_tokens_used if it wasn't also sent by client
+        # or trust the server_stored_history's token count if this is an override for just one call.
+        # For now, let's assume current_total_tokens_used from server store is a reasonable approximation
+        # or that the client will manage tokens if they manage history fully.
+    else:
+        logging.info(f"Chat ID: {req_id}. No valid client-provided history found, or not provided. Using history from {history_source_for_logging} with {len(history_to_use)} messages.")
+    # --- End client-provided history --- 
 
     message = data.get('message')
     image_data = data.get('image_data') 
@@ -444,7 +462,7 @@ def chat():
         result_data = assistant.chat(
             user_input=message_content,
             provider=provider, 
-            conversation_history=current_conversation_history, 
+            conversation_history=history_to_use, # Use the determined history_to_use
             total_tokens_used=current_total_tokens_used,       
             mode=mode,
             request_id=req_id
