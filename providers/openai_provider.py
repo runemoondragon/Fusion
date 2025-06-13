@@ -40,7 +40,7 @@ class OpenAIProvider(BaseProvider):
 
     @property
     def name(self) -> str:
-        return "OpenAIProvider"
+        return "openai"
 
     def _normalize_message_blocks(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
@@ -313,9 +313,12 @@ class OpenAIProvider(BaseProvider):
             "temperature": config.DEFAULT_TEMPERATURE,
             "max_tokens": config.MAX_TOKENS
         }
-        # Add system prompt if extracted
+        
+        # Add system prompt to messages if extracted (OpenAI expects it in messages array)
         if system_prompt:
-            request_params["system"] = system_prompt
+            # Insert system message at the beginning of the messages array
+            formatted_history.insert(0, {"role": "system", "content": system_prompt})
+            request_params["messages"] = formatted_history
 
         try:
             start_time = time.time()

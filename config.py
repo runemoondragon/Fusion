@@ -19,12 +19,9 @@ class Config:
 
     # Paths
     BASE_DIR = Path(__file__).parent
-    TOOLS_DIR = BASE_DIR / "tools"
     PROMPTS_DIR = BASE_DIR / "prompts"
-    GENERATED_FILES_DIR = BASE_DIR / "generated_files" # Added for tool outputs
 
     # Assistant Configuration
     ENABLE_THINKING = True
-    SHOW_TOOL_USAGE = True
     SHOW_TOKEN_USAGE = True
     DEFAULT_TEMPERATURE = 0.7

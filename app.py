@@ -24,12 +24,6 @@ app.secret_key = os.getenv('FLASK_SECRET_KEY', os.urandom(24))
 
 # Ensure upload directory exists
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-# Ensure base generated files directory exists
-if hasattr(Config, 'GENERATED_FILES_DIR') and Config.GENERATED_FILES_DIR:
-    os.makedirs(Config.GENERATED_FILES_DIR, exist_ok=True)
-    logging.info(f"Ensured base directory for generated files exists: {Config.GENERATED_FILES_DIR}")
-else:
-    logging.warning("Config.GENERATED_FILES_DIR is not set. File generation by tools might fail or use a default relative path.")
 
 # Assistant is instantiated once, its methods will operate on passed-in history & tokens
 assistant = Assistant()
@@ -74,8 +68,6 @@ NEUROSWITCH_ROUTER_ALIASES = {
 api_client_session_store = {}
 
 # --- Basic Auth Definition ---
-# EXPECTED_USERNAME = "admin" # Old hardcoded value
-# EXPECTED_PASSWORD = "onlyadmincanusethis" # Old hardcoded value
 EXPECTED_USERNAME = os.getenv("FLASK_BASIC_AUTH_USERNAME")
 EXPECTED_PASSWORD = os.getenv("FLASK_BASIC_AUTH_PASSWORD")
 
@@ -174,7 +166,6 @@ def set_provider():
     req_id, req_type = get_request_identifier_and_type()
     data = request.json
     provider_name = data.get('provider')
-    # available_providers = list(ProviderFactory._providers.keys()) # Old check
     available_providers = ALL_PROVIDERS_WITH_NEUROSWITCH # Check against the full list
     if provider_name and provider_name in available_providers:
         session['provider'] = provider_name
@@ -188,61 +179,17 @@ def set_provider():
 def chat():
     req_id, req_type = get_request_identifier_and_type()
     
-    # NEW: Extract provider-specific API keys from headers
+    # Extract provider-specific API keys from headers
     openai_user_key = request.headers.get("X-OpenAI-API-Key")
     claude_user_key = request.headers.get("X-Claude-API-Key")
     gemini_user_key = request.headers.get("X-Gemini-API-Key")
-    # END NEW
 
-    # !!!!! ----- ADDED CRITICAL LOGGING ----- !!!!!
     logging.critical(f"----- NEW /chat REQUEST -----")
     logging.critical(f"Incoming req_id: {req_id}, req_type: {req_type}")
-    # Log all headers for API requests to see exactly what's coming in
-    if req_type == "api":
-        headers_str = json.dumps(dict(request.headers), indent=2)
-        logging.critical(f"Incoming API Request Headers: {headers_str}")
-    
-    # Log the state of api_client_session_store BEFORE getting session data
-    if req_type == "api":
-        # Make a copy of keys to avoid issues if dict changes during iteration (though unlikely here)
-        current_keys = list(api_client_session_store.keys())
-        logging.critical(f"Current api_client_session_store keys: {current_keys}")
-        if req_id in api_client_session_store:
-            # Log only a summary of history to avoid huge log lines
-            history_summary = []
-            if api_client_session_store[req_id]['conversation_history']:
-                first_msg_role = api_client_session_store[req_id]['conversation_history'][0].get('role', 'unknown')
-                first_msg_content_preview = str(api_client_session_store[req_id]['conversation_history'][0].get('content', ''))[:50]
-                history_summary.append(f"First msg: role={first_msg_role}, content='{first_msg_content_preview}...'")
-                if len(api_client_session_store[req_id]['conversation_history']) > 1:
-                    history_summary.append(f"...and {len(api_client_session_store[req_id]['conversation_history']) - 1} more message(s).")
-            else:
-                history_summary.append("History is empty.")
-            logging.critical(f"Data for req_id '{req_id}' IN api_client_session_store BEFORE get_session_data: History summary: {', '.join(history_summary)}. Tokens: {api_client_session_store[req_id]['total_tokens_used']}")
-        else:
-            logging.critical(f"req_id '{req_id}' NOT YET IN api_client_session_store.")
-    # !!!!! ----- END OF ADDED CRITICAL LOGGING ----- !!!!!
 
     session_data = get_session_data(req_id, req_type)
     server_stored_history = session_data['conversation_history']
     current_total_tokens_used = session_data['total_tokens_used']
-    
-    # !!!!! ----- ADDED CRITICAL LOGGING ----- !!!!!
-    # Log summary of history AFTER get_session_data
-    history_summary_after = []
-    if server_stored_history:
-        first_msg_role_after = server_stored_history[0].get('role', 'unknown')
-        first_msg_content_preview_after = str(server_stored_history[0].get('content', ''))[:50]
-        history_summary_after.append(f"First msg: role={first_msg_role_after}, content='{first_msg_content_preview_after}...'")
-        if len(server_stored_history) > 1:
-            history_summary_after.append(f"...and {len(server_stored_history) - 1} more message(s).")
-    else:
-        history_summary_after.append("History is empty.")
-    logging.critical(f"Data for req_id '{req_id}' LOADED BY get_session_data: History summary: {', '.join(history_summary_after)}. Tokens: {current_total_tokens_used}")
-    # !!!!! ----- END OF ADDED CRITICAL LOGGING ----- !!!!!
-
-    # A. Extract external API key from X-Provider-API-Key header
-    # No longer needed as we use specific keys above.
 
     data = request.json
     logging.debug(f"API Chat ID: {req_id}. Full request JSON data: {data}")
@@ -256,61 +203,40 @@ def chat():
         logging.info(f"Chat ID: {req_id}. Client provided a history with {len(client_provided_history)} messages. PRIORITIZING client history.")
         history_to_use = client_provided_history
         history_source_for_logging = "client_payload"
-        # If client sends history, they are responsible for its integrity.
-        # We might need to re-calculate current_total_tokens_used if it wasn't also sent by client
-        # or trust the server_stored_history's token count if this is an override for just one call.
-        # For now, let's assume current_total_tokens_used from server store is a reasonable approximation
-        # or that the client will manage tokens if they manage history fully.
     else:
         logging.info(f"Chat ID: {req_id}. No valid client-provided history found, or not provided. Using history from {history_source_for_logging} with {len(history_to_use)} messages.")
-    # --- End client-provided history --- 
 
     message = data.get('message')
     image_data = data.get('image_data') 
     mode = data.get('mode')
-    client_specified_model = data.get('model') # ITEM 1: Extract client-specified model
+    client_specified_model = data.get('model')
 
     # --- Refined Provider Selection Logic for API and Flask UI ---
     is_direct_provider_request = False 
-    provider_to_use_for_routing_or_direct_call = None # Will hold the name for direct instantiation or NEUROSWITCH_PROVIDER_NAME
+    provider_to_use_for_routing_or_direct_call = None
 
     if req_type == "api":
-        # --- ADDED: Log raw request body ---
-        try:
-            raw_request_body = request.data.decode('utf-8')
-            logging.debug(f"API Chat ID: {req_id}. Raw request body: {raw_request_body}")
-        except Exception as e:
-            logging.error(f"API Chat ID: {req_id}. Error decoding raw request body: {e}")
-        # --- END ADDED ---
-
-        # --- ADDED: Log parsed JSON payload (data) ---
-        logging.debug(f"API Chat ID: {req_id}. Parsed JSON payload (data): {data}")
-        # --- END ADDED ---
-        
         model_from_payload = data.get('requested_provider')
         normalized_model_payload = str(model_from_payload).lower() if model_from_payload else None
 
         logging.info(f"API Chat ID: {req_id}. Provider determination based on JSON payload 'requested_provider': '{model_from_payload}'")
 
         if normalized_model_payload:
-            if normalized_model_payload in DIRECT_PROVIDER_KEYS: # e.g., model: "openai"
+            if normalized_model_payload in DIRECT_PROVIDER_KEYS:
                 provider_to_use_for_routing_or_direct_call = normalized_model_payload
                 is_direct_provider_request = True 
-            elif DIRECT_PROVIDER_ALIASES.get(normalized_model_payload) in DIRECT_PROVIDER_KEYS: # e.g. model: "gpt-4o"
+            elif DIRECT_PROVIDER_ALIASES.get(normalized_model_payload) in DIRECT_PROVIDER_KEYS:
                 provider_to_use_for_routing_or_direct_call = DIRECT_PROVIDER_ALIASES[normalized_model_payload]
                 is_direct_provider_request = True
                 logging.info(f"API Chat ID: {req_id}. 'requested_provider' field '{model_from_payload}' mapped to direct provider '{provider_to_use_for_routing_or_direct_call}' via alias.")
-            elif normalized_model_payload in NEUROSWITCH_ROUTER_ALIASES: # e.g., model: "neuroswitch"
+            elif normalized_model_payload in NEUROSWITCH_ROUTER_ALIASES:
                 provider_to_use_for_routing_or_direct_call = NEUROSWITCH_PROVIDER_NAME
-                # is_direct_provider_request remains False, so NeuroSwitch will run if this is the final decision
-            else: # Unrecognized 'model' value
+            else:
                 logging.warning(f"API Chat ID: {req_id}. 'requested_provider' field '{model_from_payload}' not recognized. Defaulting to NeuroSwitch router.")
                 provider_to_use_for_routing_or_direct_call = NEUROSWITCH_PROVIDER_NAME
-                # is_direct_provider_request remains False
-        else: # 'model' field is missing
+        else:
             logging.warning(f"API Chat ID: {req_id}. 'requested_provider' field missing in JSON payload. Defaulting to NeuroSwitch router.")
             provider_to_use_for_routing_or_direct_call = NEUROSWITCH_PROVIDER_NAME
-            # is_direct_provider_request remains False
 
     else: # req_type == "flask_session"
         provider_from_session = session.get('provider', DEFAULT_PROVIDER)
@@ -325,20 +251,18 @@ def chat():
             is_direct_provider_request = True
         elif normalized_session_provider in NEUROSWITCH_ROUTER_ALIASES: 
             provider_to_use_for_routing_or_direct_call = NEUROSWITCH_PROVIDER_NAME
-            # is_direct_provider_request remains False
         else: 
             logging.warning(f"Flask Session Chat ID: {req_id}. Provider '{provider_from_session}' from session not recognized. Defaulting to NeuroSwitch router.")
             provider_to_use_for_routing_or_direct_call = NEUROSWITCH_PROVIDER_NAME
-            # is_direct_provider_request remains False
     
     logging.info(f"Chat ID: {req_id}. Initial Provider Decision: '{provider_to_use_for_routing_or_direct_call}', Is Direct Request Flag: {is_direct_provider_request}")
 
     # --- NeuroSwitch Logic ---
     actual_provider_name_to_instantiate = provider_to_use_for_routing_or_direct_call 
-    neuroswitch_active = False # Default, only set True if classifier actually runs
-    fallback_reason = None # Initialize fallback_reason
+    neuroswitch_active = False
+    fallback_reason = None
 
-    # Prepare message content and extract text ...
+    # Prepare message content and extract text for classification
     if image_data:
         message_content = [
             {
@@ -353,15 +277,12 @@ def chat():
         if message.strip():
             text_part = {"type": "text", "text": message}
             message_content.append(text_part)
-            text_input_for_classification = message # Use text part for classification
+            text_input_for_classification = message
         else:
-             # If only image, maybe classify based on a standard prompt or default?
-             # For now, if only image, let's default or maybe force Gemini?
-             # Let's stick to default if NeuroSwitch is chosen with only image for now.
-             text_input_for_classification = "Image uploaded" # Placeholder text?
+             text_input_for_classification = "Image uploaded"
     else:
         message_content = message
-        text_input_for_classification = message # Use the whole message if no image
+        text_input_for_classification = message
 
     # Classifier runs if it was NOT a direct request AND the chosen path was NeuroSwitch
     if not is_direct_provider_request and provider_to_use_for_routing_or_direct_call == NEUROSWITCH_PROVIDER_NAME:
@@ -372,22 +293,12 @@ def chat():
         fallback_reason = neuroswitch_status["fallback_reason"]
         logging.info(f"NeuroSwitch classifier for ID: {req_id} result: Provider='{actual_provider_name_to_instantiate}', Classifier Active Flag={neuroswitch_active}, Reason='{fallback_reason}'")
     elif is_direct_provider_request:
-        # Direct provider was chosen, classifier is bypassed.
-        # actual_provider_name_to_instantiate is already correctly set from provider_to_use_for_routing_or_direct_call
         logging.info(f"Chat ID: {req_id}. Using DIRECTLY specified provider: {actual_provider_name_to_instantiate}. NeuroSwitch classifier bypassed.")
-        # neuroswitch_active remains False
     else:
-        # This case means is_direct_provider_request is False,
-        # AND provider_to_use_for_routing_or_direct_call was NOT NEUROSWITCH_PROVIDER_NAME.
-        # This implies an invalid provider name was given that wasn't a direct key, alias, or NeuroSwitch alias.
-        # We'll attempt to use what was decided directly, but log an error as this path is unexpected.
         logging.error(f"Chat ID: {req_id}. Unexpected provider routing state. Provider for routing was '{provider_to_use_for_routing_or_direct_call}' but not NeuroSwitch, and not flagged as a direct request. Attempting to use it directly. NeuroSwitch classifier bypassed.")
         actual_provider_name_to_instantiate = provider_to_use_for_routing_or_direct_call 
-        # neuroswitch_active remains False
 
-    # --- End NeuroSwitch Logic ---
-
-    # NEW: API Key Selection Logic
+    # API Key Selection Logic
     selected_key_to_pass_to_factory = None
     key_source_for_logging = "Unknown" 
 
@@ -414,90 +325,86 @@ def chat():
             key_source_for_logging = ".env (GEMINI_API_KEY)"
     else:
         logging.error(f"[Chat ID: {req_id}] Unknown provider '{actual_provider_name_to_instantiate}' determined. Cannot select API key.")
-        # Consider returning an error response here
         return jsonify({
             'response': f"Error: Unknown provider '{actual_provider_name_to_instantiate}' specified.",
             'provider_used': actual_provider_name_to_instantiate,
+            'model_used': 'unknown',
             'neuroswitch_active': neuroswitch_active,
-            'fallback_reason': fallback_reason, # Already initialized
+            'fallback_reason': fallback_reason,
             'token_usage': {'total_tokens': current_total_tokens_used, 'max_tokens': Config.MAX_CONVERSATION_TOKENS}
         }), 500
 
     if selected_key_to_pass_to_factory:
         logging.info(f"[Chat ID: {req_id}] Attempting to initialize provider '{actual_provider_name_to_instantiate}' using API key from: {key_source_for_logging}.")
     else:
-        # This log indicates that neither a user-provided header key NOR a .env key was found for the selected provider.
         logging.warning(f"[Chat ID: {req_id}] No API key found for provider '{actual_provider_name_to_instantiate}' from header or .env. Provider initialization will likely fail or use a non-functional default.")
-    # END NEW
 
-    # Instantiate the provider (either direct or chosen by NeuroSwitch)
-    logging.info(f"API Chat ID: {req_id}. Attempting to instantiate provider: '{actual_provider_name_to_instantiate}' with key from '{key_source_for_logging}'. Client-specified model: '{client_specified_model}'.") # ITEM 2: Update log message
+    # Instantiate the provider
+    logging.info(f"API Chat ID: {req_id}. Attempting to instantiate provider: '{actual_provider_name_to_instantiate}' with key from '{key_source_for_logging}'. Client-specified model: '{client_specified_model}'.")
     try:
         provider = ProviderFactory.create_provider(
             actual_provider_name_to_instantiate, 
             api_key=selected_key_to_pass_to_factory,
-            client_model=client_specified_model # ITEM 3: Pass client_specified_model to factory
+            client_model=client_specified_model
         )
     except ValueError as e:
          logging.error(f"[Chat ID: {req_id}] Failed to create provider instance '{actual_provider_name_to_instantiate}': {e}")
          return jsonify({
              'response': f"Error: Could not initialize AI provider '{actual_provider_name_to_instantiate}'. Please select a valid provider or check configuration.",
              'provider_used': actual_provider_name_to_instantiate,
+             'model_used': 'unknown',
              'neuroswitch_active': neuroswitch_active,
              'fallback_reason': fallback_reason,
              'token_usage': {'total_tokens': current_total_tokens_used, 'max_tokens': Config.MAX_CONVERSATION_TOKENS}
-         }), 400 # Client error for invalid provider
+         }), 400
     except Exception as e:
          logging.exception(f"Unexpected error creating provider '{actual_provider_name_to_instantiate}' for ID: {req_id}")
          return jsonify({
              'response': f"Error: An unexpected error occurred while setting up the AI provider.",
              'provider_used': actual_provider_name_to_instantiate,
+             'model_used': 'unknown',
              'neuroswitch_active': neuroswitch_active,
              'fallback_reason': fallback_reason,
              'token_usage': {'total_tokens': current_total_tokens_used, 'max_tokens': Config.MAX_CONVERSATION_TOKENS}
-         }), 500 # Server error
+         }), 500
     
     try:
-        # Call assistant.chat, REMOVE x_provider_api_key
+        # Call assistant.chat (simplified without tool support)
         result_data = assistant.chat(
             user_input=message_content,
             provider=provider, 
-            conversation_history=history_to_use, # Use the determined history_to_use
+            conversation_history=history_to_use,
             total_tokens_used=current_total_tokens_used,       
             mode=mode,
             request_id=req_id
-            # REMOVED: x_provider_api_key=x_provider_api_key 
         )
 
-        logging.debug(f"App.py: Data received from assistant.chat: {json.dumps(result_data)}")
+        logging.debug(f"App.py: Data received from assistant.chat: {json.dumps(result_data, default=str)}")
 
         # Save the updated history and tokens back to the correct session store
-        save_session_data(req_id, req_type, result_data['updated_conversation_history'], result_data['updated_total_tokens_used'])
-        logging.info(f"Chat successful for ID: {req_id}. New history length: {len(result_data['updated_conversation_history'])}. New Tokens: {result_data['updated_total_tokens_used']}")
+        save_session_data(req_id, req_type, result_data['updated_history'], result_data['total_tokens'])
+        logging.info(f"Chat successful for ID: {req_id}. New history length: {len(result_data['updated_history'])}. New Tokens: {result_data['total_tokens']}")
 
-        response_text = result_data.get('response', "[No response text received]")
-        tool_name = result_data.get('tool_name')
-        usage_from_assistant = result_data.get('usage', {}) # This is per-call usage
-        model_actually_used = result_data.get('model_used') # ITEM 1: Extract model_used
-        file_downloads_from_assistant = result_data.get('file_downloads') # Extract file_downloads
+        response_text = result_data.get('assistant_response', "[No response text received]")
+        provider_used = result_data.get('provider_used', actual_provider_name_to_instantiate)
+        model_used = result_data.get('model_used', 'unknown')
+        usage_from_assistant = result_data.get('usage', {})
         
         token_usage_response = {
-            'input_tokens': usage_from_assistant.get('input_tokens'),
-            'output_tokens': usage_from_assistant.get('output_tokens'),
-            'total_tokens': result_data['updated_total_tokens_used'], # This is the cumulative for the session
+            'input_tokens': usage_from_assistant.get('input_tokens', 0),
+            'output_tokens': usage_from_assistant.get('output_tokens', 0),
+            'runtime': usage_from_assistant.get('runtime', 0.0),
+            'total_tokens': result_data['total_tokens'],
             'max_tokens': Config.MAX_CONVERSATION_TOKENS,
-            'runtime': usage_from_assistant.get('runtime')
         }
         
         return jsonify({
             'response': response_text,
-            'tool_name': tool_name,
-            'provider_used': actual_provider_name_to_instantiate, 
-            'model_used': model_actually_used, # ITEM 2: Include model_used in the response
+            'provider_used': provider_used,
+            'model_used': model_used,
             'neuroswitch_active': neuroswitch_active, 
             'fallback_reason': fallback_reason,
-            'token_usage': token_usage_response,
-            'file_downloads': file_downloads_from_assistant # Add file_downloads to the response
+            'token_usage': token_usage_response
         })
         
     except Exception as e:
@@ -505,10 +412,11 @@ def chat():
         return jsonify({
             'response': f"Error processing chat: {str(e)}",
             'provider_used': actual_provider_name_to_instantiate,
+            'model_used': 'unknown',
             'neuroswitch_active': neuroswitch_active,
             'fallback_reason': fallback_reason,
             'token_usage': {'total_tokens': current_total_tokens_used, 'max_tokens': Config.MAX_CONVERSATION_TOKENS}
-        }), 500 # Server error during chat processing
+        }), 500
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
@@ -523,8 +431,6 @@ def upload_file():
     
     if file and file.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')):
         filename = secure_filename(file.filename)
-        # Note: Storing uploads should be carefully considered for production (e.g., object storage)
-        # For NeuroSwitch, this seems like a helper for image modality, not persistent storage.
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(filepath)
         
@@ -550,25 +456,16 @@ def upload_file():
 def reset():
     req_id, req_type = get_request_identifier_and_type()
     
-    # !!!!! ----- ADDED CRITICAL LOGGING ----- !!!!!
     logging.critical(f"----- NEW /reset REQUEST -----")
     logging.critical(f"Incoming req_id for reset: {req_id}, req_type: {req_type}")
-    if req_type == "api":
-        # Make a copy of keys to avoid issues if dict changes during iteration
-        current_keys_before_reset = list(api_client_session_store.keys())
-        logging.critical(f"Resetting API client session. BEFORE reset, keys in api_client_session_store: {current_keys_before_reset}")
-        if req_id in api_client_session_store:
-            logging.critical(f"Data for req_id '{req_id}' being reset. Old history length: {len(api_client_session_store[req_id]['conversation_history'])}, Old tokens: {api_client_session_store[req_id]['total_tokens_used']}")
-    # !!!!! ----- END OF ADDED CRITICAL LOGGING ----- !!!!!
     
     if req_type == "api":
         if req_id in api_client_session_store:
             api_client_session_store[req_id]['conversation_history'] = []
             api_client_session_store[req_id]['total_tokens_used'] = 0
-            logging.critical(f"Conversation RESET for API client ID: {req_id}. Store now contains history length: {len(api_client_session_store[req_id]['conversation_history'])}, tokens: {api_client_session_store[req_id]['total_tokens_used']}")
+            logging.critical(f"Conversation RESET for API client ID: {req_id}")
             status_message = f"Conversation reset for API client ID: {req_id}"
         else:
-            # This case means the ID wasn't in the store, so initialize it as empty.
             api_client_session_store[req_id] = {'conversation_history': [], 'total_tokens_used': 0}
             logging.critical(f"No active session found for API client ID '{req_id}' to reset, but INITIALIZED it as empty.")
             status_message = f"No active session found for API client ID '{req_id}' to reset; initialized as new empty session."
@@ -580,61 +477,6 @@ def reset():
         status_message = f"Conversation reset for Flask session ID: {req_id}"
         
     return jsonify({'status': 'success', 'message': status_message})
-
-@app.route('/download_file/<request_id_from_url>/<path:filename>', methods=['GET'])
-def download_generated_file(request_id_from_url: str, filename: str):
-    current_req_id, req_type = get_request_identifier_and_type()
-    logging.debug(f"Download attempt for file '{filename}' under request_id_from_url '{request_id_from_url}'. Current session req_id: '{current_req_id}', type: '{req_type}'.")
-
-    # Security Check: Ensure the request_id in the URL matches the current session's ID
-    # This is crucial to prevent users from accessing other users' files.
-    if request_id_from_url != current_req_id:
-        logging.warning(f"Forbidden download attempt: URL request_id '{request_id_from_url}' does not match session req_id '{current_req_id}'.")
-        return jsonify({'error': 'Forbidden. You do not have permission to access this file.'}), 403
-
-    # Sanitize the filename from the URL path
-    safe_filename = secure_filename(filename)
-    if not safe_filename or safe_filename != filename: # Check if secure_filename altered it (e.g., removed path components) or emptied it
-        logging.warning(f"Download attempt with potentially unsafe filename rejected. Original: '{filename}', Secured: '{safe_filename}'.")
-        return jsonify({'error': 'Invalid filename.'}), 400
-
-    try:
-        # Construct the directory path for this specific request_id
-        # Config.GENERATED_FILES_DIR should be an absolute path or resolvable relative to app root.
-        # It's safer if Config.GENERATED_FILES_DIR is an absolute path.
-        # For send_from_directory, the first argument is the directory, and the second is the path (filename) relative to that directory.
-        session_specific_dir = os.path.join(Config.GENERATED_FILES_DIR, request_id_from_url)
-        
-        logging.info(f"Attempting to send file '{safe_filename}' from directory '{session_specific_dir}' for req_id '{current_req_id}'.")
-
-        # Ensure the base generated files directory exists (though subdirs are made by the tool)
-        if not os.path.isdir(Config.GENERATED_FILES_DIR):
-            logging.error(f"Configuration error: Config.GENERATED_FILES_DIR ('{Config.GENERATED_FILES_DIR}') does not exist.")
-            return jsonify({'error': 'Server configuration error preventing file download.'}), 500
-        
-        # Check if the session-specific directory exists
-        if not os.path.isdir(session_specific_dir):
-            logging.warning(f"File download failed: Session directory '{session_specific_dir}' not found for file '{safe_filename}'.")
-            return jsonify({'error': 'File not found (session directory missing).'}), 404
-            
-        # Check if the file itself exists within that directory
-        file_path_to_check = os.path.join(session_specific_dir, safe_filename)
-        if not os.path.isfile(file_path_to_check):
-            logging.warning(f"File download failed: File '{safe_filename}' not found in '{session_specific_dir}'.")
-            return jsonify({'error': 'File not found.'}), 404
-
-        return send_from_directory(
-            directory=session_specific_dir, 
-            path=safe_filename, # path is relative to 'directory'
-            as_attachment=True
-        )
-
-    except FileNotFoundError: # Should be caught by checks above, but as a fallback
-        logging.warning(f"File not found for download: '{safe_filename}' in session dir for '{request_id_from_url}'.")
-        return jsonify({'error': 'File not found.'}), 404
-    except Exception as e:
-        logging.exception(f"Error during file download for req_id '{current_req_id}', file '{safe_filename}': {e}")
-        return jsonify({'error': 'An unexpected error occurred while trying to download the file.'}), 500
 
 if __name__ == '__main__':
     # Use debug=True for development, False for production

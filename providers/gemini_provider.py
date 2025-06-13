@@ -71,7 +71,7 @@ class GeminiProvider(BaseProvider):
 
     @property
     def name(self) -> str:
-        return "GeminiProvider"
+        return "gemini"
 
     def _sanitize_schema_for_gemini(self, schema: Dict[str, Any]) -> Dict[str, Any]:
         """Recursively sanitize schema fields for Gemini compatibility."""

@@ -35,15 +35,20 @@ class ClaudeProvider(BaseProvider):
 
     @property
     def name(self) -> str:
-        return "ClaudeProvider"
+        return "claude"
 
     def chat(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]], config: Config) -> Dict[str, Any]:
         """Send chat request to Claude API."""
         self.logger.debug(f"Sending request to Claude with {len(messages)} messages and {len(tools)} tools.")
         
         # TEMPORARY: Remove 'tool_name' from tool_result blocks in user messages
+        # ALSO: Remove any system messages from the messages array as Claude expects system prompts as separate parameter
         processed_messages = []
         for msg in messages:
+            # Skip any system messages - Claude handles system prompts separately
+            if msg.get('role') == 'system':
+                continue
+                
             if msg.get('role') == 'user' and isinstance(msg.get('content'), list):
                 new_content = []
                 for item in msg['content']:
@@ -70,25 +75,39 @@ class ClaudeProvider(BaseProvider):
 
         try:
             start_time = time.time()
-            response = self.client.messages.create(
-                model=model_name_to_use, # Use the determined model name
-                max_tokens=config.MAX_TOKENS,
-                temperature=config.DEFAULT_TEMPERATURE,
-                system=self._get_system_prompt(),
-                messages=processed_messages, # Use filtered messages
-                tools=tools,
-                tool_choice={"type": "auto"}
-            )
+            
+            # Prepare request parameters
+            request_params = {
+                "model": model_name_to_use,
+                "max_tokens": config.MAX_TOKENS,
+                "temperature": config.DEFAULT_TEMPERATURE,
+                "system": self._get_system_prompt(),
+                "messages": processed_messages
+            }
+            
+            # Only include tools and tool_choice if tools are provided
+            if tools:
+                request_params["tools"] = tools
+                request_params["tool_choice"] = {"type": "auto"}
+            
+            response = self.client.messages.create(**request_params)
             end_time = time.time()
             runtime = end_time - start_time
             self.logger.debug(f"Received response from Claude. Stop reason: {response.stop_reason}")
             self.logger.debug(f"Claude usage: input_tokens={response.usage.input_tokens}, output_tokens={response.usage.output_tokens}, runtime={runtime}")
+            
+            # Extract text content from Claude's response content blocks
+            content_text = ""
+            if response.content:
+                for block in response.content:
+                    if hasattr(block, 'text'):
+                        content_text += block.text
+                    elif isinstance(block, dict) and 'text' in block:
+                        content_text += block['text']
+            
             # Convert the response object to a dictionary for consistent return type
-            # The exact structure needed depends on how Assistant processes it later.
-            # For now, return the raw object's __dict__ or relevant parts.
-            # Need to ensure 'content' and 'usage' keys are present or mapped.
             response_dict = {
-                'content': response.content,
+                'content': content_text,  # Use extracted text instead of raw content blocks
                 'usage': {
                     'input_tokens': response.usage.input_tokens,
                     'output_tokens': response.usage.output_tokens,
@@ -124,14 +143,14 @@ class ClaudeProvider(BaseProvider):
             raise RuntimeError(f"An unexpected error occurred interacting with Claude: {e}") from e
 
     def _get_system_prompt(self) -> str:
-        """Helper to potentially load a system prompt. TODO: Adapt based on original Assistant logic."""
-        # This needs to replicate how the system prompt was handled in the Assistant class
-        # For now, returning a placeholder or checking if SystemPrompts was used.
-        # Let's assume SystemPrompts might be used later or was part of Assistant.
+        """Helper to load the system prompt using SystemPrompts class."""
         try:
             from prompts.system_prompts import SystemPrompts
-            # Combine the default prompt and tool usage guidelines
-            return f"{SystemPrompts.DEFAULT}\n\n{SystemPrompts.TOOL_USAGE}"
+            system_prompts = SystemPrompts()
+            return system_prompts.get_system_prompt("normal")
         except ImportError:
             self.logger.warning("SystemPrompts class not found. Using a basic default prompt.")
             return "You are a helpful assistant." # Default basic prompt 
+        except Exception as e:
+            self.logger.warning(f"Error loading system prompt: {e}. Using a basic default prompt.")
+            return "You are a helpful assistant." 
